@@ -1,0 +1,16 @@
+[package]
+name = "oxc"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+path = "dummy.rs" # We just need this for Cargo to generate the Cargo.lock
+
+[dependencies]
+oxc_allocator = "0.31.0"
+oxc_codegen = "0.31.0"
+oxc_diagnostics = "0.31.0"
+oxc_isolated_declarations = "0.31.0"
+oxc_parser = "0.31.0"
+oxc_span = "0.31.0"

@@ -4,6 +4,7 @@
 
 # Required until this is the default; expected in Bazel 7
 common --enable_bzlmod
+common --lockfile_mode=off
 
 # Don’t want to push a rules author to update their deps if not needed.
 # https://bazel.build/reference/command-line-reference#flag--check_direct_dependencies

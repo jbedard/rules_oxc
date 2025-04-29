@@ -87,29 +87,13 @@ pub fn get_isolated_declarations(
 
     let isolated_declaration_result = IsolatedDeclarations::new(
         &allocator,
-        source_text,
-        &parser.trivias,
         OxcIsolatedDeclarationsOptions {
             strip_internal: options.strip_internal,
         },
     )
     .build(&parser.program);
 
-    let code_generator = CodeGenerator::new().enable_comment(
-        source_text,
-        parser.trivias,
-        CommentOptions {
-            preserve_annotate_comments: false,
-        },
-    );
-
-    let code_generator = if options.sourcemap {
-        code_generator.enable_source_map(filename, source_text)
-    } else {
-        code_generator
-    };
-
-    let code_gen_result = code_generator.build(&isolated_declaration_result.program);
+    let code_gen_result = CodeGenerator::new().build(&isolated_declaration_result.program);
 
     let mut errors = vec![];
     if !parser.errors.is_empty() || !isolated_declaration_result.errors.is_empty() {

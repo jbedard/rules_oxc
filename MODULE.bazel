@@ -1,7 +1,7 @@
 "Bazel dependencies"
 
 module(
-    name = "com_myorg_rules_mylang",
+    name = "rules_oxc",
     version = "0.0.0",
     compatibility_level = 1,
 )
@@ -9,13 +9,41 @@ module(
 bazel_dep(name = "bazel_skylib", version = "1.4.1")
 bazel_dep(name = "platforms", version = "0.0.5")
 
+# For the JsInfo provider.
+bazel_dep(name = "aspect_rules_js", version = "2.0.2")
+
 bazel_dep(name = "gazelle", version = "0.35.0", dev_dependency = True, repo_name = "bazel_gazelle")
 bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.4.1", dev_dependency = True)
 bazel_dep(name = "aspect_bazel_lib", version = "1.32.1", dev_dependency = True)
 bazel_dep(name = "buildifier_prebuilt", version = "6.1.2", dev_dependency = True)
 
-mylang = use_extension("//mylang:extensions.bzl", "mylang")
-mylang.toolchain(mylang_version = "1.14.2")
-use_repo(mylang, "mylang_toolchains")
+bazel_dep(name = "rules_rust", version = "0.53.0", dev_dependency = True)
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.82.0"],
+)
+use_repo(
+    rust,
+    "rust_toolchains",
+)
 
-register_toolchains("@mylang_toolchains//:all")
+register_toolchains(
+    "@rust_toolchains//:all",
+)
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extension.bzl",
+    "crate",
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//oxc/private:Cargo.lock",
+    manifests = ["//oxc/private:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+    ],
+)
+use_repo(crate, "crates")

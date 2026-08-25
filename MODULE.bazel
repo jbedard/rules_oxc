@@ -19,36 +19,30 @@ bazel_dep(name = "gazelle", version = "0.53.0", dev_dependency = True)
 bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.8.2", dev_dependency = True)
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)
 
-# Not a dev dependency: the transpiler rules run //private/transpiler,
-# which is built from source with rules_rs.
-bazel_dep(name = "rules_rs", version = "0.0.107")
-bazel_dep(name = "llvm", version = "0.8.18")
+# Prebuilt transpiler binaries, built from the isolated module in
+# private/transpiler and published to GitHub releases. Platform selection
+# happens in //oxc/private:transpiler.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
-toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
-toolchains.toolchain(
-    edition = "2024",
-    version = "1.95.0",
-)
-use_repo(toolchains, "default_rust_toolchains")
+TRANSPILER_VERSION = "0.0.1"
 
-# Keeps @rules_rust references working via the rules_rs facade.
-rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
-use_repo(rules_rust, "rules_rust")
-
-register_toolchains(
-    "@default_rust_toolchains//...",
-    "@llvm//toolchain:all",
+http_file(
+    name = "transpiler_aarch64_apple_darwin",
+    executable = True,
+    sha256 = "171c23f0511f2f7ab72991bc7360ace9991aac622001758ae2ffbe26c23e839a",
+    url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-apple-darwin",
 )
 
-crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
-crate.from_cargo(
-    name = "oxc_crates",
-    cargo_lock = "//private/transpiler:Cargo.lock",
-    cargo_toml = "//private/transpiler:Cargo.toml",
-    platform_triples = [
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-        "aarch64-apple-darwin",
-    ],
+http_file(
+    name = "transpiler_aarch64_unknown_linux_gnu",
+    executable = True,
+    sha256 = "f341d4b6c15babd22fe91ce2b659c4855db4e75588b9edeb689dc467050266ad",
+    url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-unknown-linux-gnu",
 )
-use_repo(crate, "oxc_crates")
+
+http_file(
+    name = "transpiler_x86_64_unknown_linux_gnu",
+    executable = True,
+    sha256 = "1c79fd708e3e2da76eb603acaed551c97cfa1ff016133d7109a5c5c4c2187cdf",
+    url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-x86_64-unknown-linux-gnu",
+)

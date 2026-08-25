@@ -12,43 +12,36 @@ use oxc::transformer::{CompilerAssumptions, TransformOptions, Transformer, TypeS
 use std::fs;
 use std::path::{Path, PathBuf};
 
-enum Mode {
-    Js {
-        rewrite_extensions: bool,
-        source_maps: bool,
-    },
-    Dts,
+struct Options {
+    emit_js: bool,
+    emit_dts: bool,
+    rewrite_extensions: bool,
+    source_maps: bool,
+}
+
+struct Entry {
+    src: String,
+    js_out: Option<String>,
+    dts_out: Option<String>,
 }
 
 fn main() {
-    let mut mode: Option<Mode> = None;
+    let mut options = Options {
+        emit_js: false,
+        emit_dts: false,
+        rewrite_extensions: false,
+        source_maps: false,
+    };
     let mut manifest_path: Option<String> = None;
-    let mut rewrite_extensions = false;
-    let mut source_maps = false;
     let mut positional: Vec<String> = Vec::new();
-    let mut args_iter = std::env::args().skip(1).peekable();
+    let mut args_iter = std::env::args().skip(1);
 
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
-            "--mode" => {
-                let value = args_iter.next().unwrap_or_else(|| {
-                    eprintln!("error: --mode requires js or dts");
-                    std::process::exit(1);
-                });
-                mode = Some(match value.as_str() {
-                    "js" => Mode::Js {
-                        rewrite_extensions: false,
-                        source_maps: false,
-                    },
-                    "dts" => Mode::Dts,
-                    other => {
-                        eprintln!("error: unknown mode '{other}', expected js or dts");
-                        std::process::exit(1);
-                    }
-                });
-            }
-            "--rewrite-extensions" => rewrite_extensions = true,
-            "--source-maps" => source_maps = true,
+            "--emit-js" => options.emit_js = true,
+            "--emit-dts" => options.emit_dts = true,
+            "--rewrite-extensions" => options.rewrite_extensions = true,
+            "--source-maps" => options.source_maps = true,
             "--manifest" => {
                 manifest_path = Some(args_iter.next().unwrap_or_else(|| {
                     eprintln!("error: --manifest requires a file path");
@@ -59,82 +52,72 @@ fn main() {
         }
     }
 
-    let mode = match mode {
-        Some(Mode::Js { .. }) => Mode::Js {
-            rewrite_extensions,
-            source_maps,
-        },
-        Some(Mode::Dts) => Mode::Dts,
-        None => {
-            eprintln!("error: --mode js|dts is required");
-            std::process::exit(1);
-        }
-    };
+    if !options.emit_js && !options.emit_dts {
+        eprintln!("error: at least one of --emit-js or --emit-dts is required");
+        std::process::exit(1);
+    }
 
-    let pairs: Vec<(String, String)> = if let Some(path) = manifest_path {
+    // Each manifest entry is the source path followed by the JS output path
+    // (when --emit-js) and the declaration output path (when --emit-dts).
+    let entry_width = 1 + options.emit_js as usize + options.emit_dts as usize;
+
+    let lines: Vec<String> = if let Some(path) = manifest_path {
         let content = fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("error: cannot read manifest {path}: {e}");
             std::process::exit(1);
         });
-        let lines: Vec<&str> = content.lines().collect();
-        if !lines.len().is_multiple_of(2) {
-            eprintln!(
-                "error: manifest must contain an even number of lines (src/dst pairs), got {}",
-                lines.len()
-            );
-            std::process::exit(1);
-        }
-        lines
-            .chunks(2)
-            .map(|c| (c[0].to_string(), c[1].to_string()))
-            .collect()
+        content.lines().map(str::to_string).collect()
     } else {
-        if !positional.len().is_multiple_of(2) {
-            eprintln!(
-                "error: expected an even number of positional arguments (src dst pairs), got {}",
-                positional.len()
-            );
-            std::process::exit(1);
-        }
         positional
-            .chunks(2)
-            .map(|c| (c[0].clone(), c[1].clone()))
-            .collect()
     };
+
+    if !lines.len().is_multiple_of(entry_width) {
+        eprintln!(
+            "error: expected entries of {entry_width} lines (src followed by output paths), got {} lines",
+            lines.len()
+        );
+        std::process::exit(1);
+    }
+
+    let entries: Vec<Entry> = lines
+        .chunks(entry_width)
+        .map(|chunk| {
+            let mut outs = chunk[1..].iter();
+            Entry {
+                src: chunk[0].clone(),
+                js_out: options.emit_js.then(|| outs.next().unwrap().clone()),
+                dts_out: options.emit_dts.then(|| outs.next().unwrap().clone()),
+            }
+        })
+        .collect();
 
     let mut all_errors: Vec<String> = Vec::new();
     let mut outputs: Vec<(String, String, Option<String>)> = Vec::new();
 
-    for (input_path, output_path) in &pairs {
-        let content = fs::read_to_string(input_path).unwrap_or_else(|e| {
-            eprintln!("error: cannot read {input_path}: {e}");
+    for entry in &entries {
+        let content = fs::read_to_string(&entry.src).unwrap_or_else(|e| {
+            eprintln!("error: cannot read {}: {e}", entry.src);
             std::process::exit(1);
         });
 
-        match &mode {
-            Mode::Js {
-                rewrite_extensions,
-                source_maps,
-            } => {
-                let result = transpile_js(input_path, &content, *rewrite_extensions, *source_maps);
-                if !result.errors.is_empty() {
-                    all_errors.extend(result.errors);
-                } else {
-                    outputs.push((output_path.clone(), result.code, result.map));
-                }
+        // Declaration files pass through unchanged and have no JS output.
+        if entry.src.ends_with(".d.ts") {
+            if let Some(dts_out) = &entry.dts_out {
+                outputs.push((dts_out.clone(), content, None));
             }
-            Mode::Dts => {
-                if input_path.ends_with(".d.ts") {
-                    outputs.push((output_path.clone(), content, None));
-                    continue;
-                }
-                let result = emit_dts(input_path, &content);
-                if !result.errors.is_empty() {
-                    all_errors.extend(result.errors);
-                } else {
-                    outputs.push((output_path.clone(), result.code, None));
-                }
-            }
+            continue;
+        }
+
+        let result = transpile(&entry.src, &content, &options);
+        if !result.errors.is_empty() {
+            all_errors.extend(result.errors);
+            continue;
+        }
+        if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
+            outputs.push((js_out.clone(), code, result.js_map));
+        }
+        if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
+            outputs.push((dts_out.clone(), code, None));
         }
     }
 
@@ -160,8 +143,9 @@ fn main() {
 }
 
 struct TranspileResult {
-    code: String,
-    map: Option<String>,
+    js_code: Option<String>,
+    js_map: Option<String>,
+    dts_code: Option<String>,
     errors: Vec<String>,
 }
 
@@ -182,12 +166,9 @@ fn render_errors(
         .collect()
 }
 
-fn transpile_js(
-    filename: &str,
-    source_text: &str,
-    rewrite_extensions: bool,
-    source_maps: bool,
-) -> TranspileResult {
+// Parses once and emits JS and/or declaration outputs from the same AST.
+// Declarations are emitted first, before the transformer mutates the program.
+fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
     let source_type = SourceType::from_path(filename)
         .unwrap_or_default()
         .with_typescript(true);
@@ -195,61 +176,85 @@ fn transpile_js(
     let allocator = Allocator::default();
     let mut parser_ret = Parser::new(&allocator, source_text, source_type).parse();
 
-    let semantic_ret = SemanticBuilder::new().build(&parser_ret.program);
-    parser_ret.diagnostics.extend(semantic_ret.diagnostics);
-    let scoping = semantic_ret.semantic.into_scoping();
-
-    let transform_options = TransformOptions {
-        // Match the SWC useDefineForClassFields=false behaviour:
-        // class fields without initializers are removed rather than set to undefined.
-        assumptions: CompilerAssumptions {
-            set_public_class_fields: true,
-            ..Default::default()
-        },
-        typescript: TypeScriptOptions {
-            remove_class_fields_without_initializer: true,
-            rewrite_import_extensions: rewrite_extensions
-                .then_some(oxc::transformer::RewriteExtensionsMode::Rewrite),
-            ..Default::default()
-        },
-        ..Default::default()
+    let mut result = TranspileResult {
+        js_code: None,
+        js_map: None,
+        dts_code: None,
+        errors: vec![],
     };
 
-    let transformer_ret = Transformer::new(&allocator, Path::new(filename), &transform_options)
-        .build_with_scoping(scoping, &mut parser_ret.program);
-
-    if !parser_ret.diagnostics.is_empty() || !transformer_ret.diagnostics.is_empty() {
-        let errors = render_errors(
-            filename,
-            source_text,
-            parser_ret
-                .diagnostics
-                .into_iter()
-                .chain(transformer_ret.diagnostics),
-        );
-        return TranspileResult {
-            code: String::new(),
-            map: None,
-            errors,
-        };
+    if !parser_ret.diagnostics.is_empty() {
+        result.errors = render_errors(filename, source_text, parser_ret.diagnostics.into_iter());
+        return result;
     }
 
-    resolve_extensionless_specifiers(&mut parser_ret.program, &allocator, Path::new(filename));
+    if options.emit_dts {
+        let decl_ret = IsolatedDeclarations::new(
+            &allocator,
+            OxcIsolatedDeclarationsOptions {
+                strip_internal: false,
+            },
+        )
+        .build(&parser_ret.program);
 
-    let mut codegen = Codegen::new();
-    if source_maps {
-        codegen = codegen.with_options(CodegenOptions {
-            source_map_path: Some(PathBuf::from(filename)),
+        if !decl_ret.diagnostics.is_empty() {
+            result.errors = render_errors(filename, source_text, decl_ret.diagnostics.into_iter());
+            return result;
+        }
+
+        result.dts_code = Some(Codegen::new().build(&decl_ret.program).code);
+    }
+
+    if options.emit_js {
+        let semantic_ret = SemanticBuilder::new().build(&parser_ret.program);
+        let semantic_diagnostics = semantic_ret.diagnostics;
+        let scoping = semantic_ret.semantic.into_scoping();
+
+        let transform_options = TransformOptions {
+            // Match the SWC useDefineForClassFields=false behaviour:
+            // class fields without initializers are removed rather than set to undefined.
+            assumptions: CompilerAssumptions {
+                set_public_class_fields: true,
+                ..Default::default()
+            },
+            typescript: TypeScriptOptions {
+                remove_class_fields_without_initializer: true,
+                rewrite_import_extensions: options
+                    .rewrite_extensions
+                    .then_some(oxc::transformer::RewriteExtensionsMode::Rewrite),
+                ..Default::default()
+            },
             ..Default::default()
-        });
-    }
-    let codegen_ret = codegen.build(&parser_ret.program);
+        };
 
-    TranspileResult {
-        code: codegen_ret.code,
-        map: codegen_ret.map.map(|m| m.to_json_string()),
-        errors: vec![],
+        let transformer_ret = Transformer::new(&allocator, Path::new(filename), &transform_options)
+            .build_with_scoping(scoping, &mut parser_ret.program);
+
+        let diagnostics: Vec<_> = semantic_diagnostics
+            .into_iter()
+            .chain(transformer_ret.diagnostics)
+            .collect();
+        if !diagnostics.is_empty() {
+            result.errors = render_errors(filename, source_text, diagnostics.into_iter());
+            return result;
+        }
+
+        resolve_extensionless_specifiers(&mut parser_ret.program, &allocator, Path::new(filename));
+
+        let mut codegen = Codegen::new();
+        if options.source_maps {
+            codegen = codegen.with_options(CodegenOptions {
+                source_map_path: Some(PathBuf::from(filename)),
+                ..Default::default()
+            });
+        }
+        let codegen_ret = codegen.build(&parser_ret.program);
+
+        result.js_code = Some(codegen_ret.code);
+        result.js_map = codegen_ret.map.map(|m| m.to_json_string());
     }
+
+    result
 }
 
 // Node's ESM loader requires fully-specified relative specifiers: no directory
@@ -319,40 +324,4 @@ fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
     }
 
     None
-}
-
-fn emit_dts(filename: &str, source_text: &str) -> TranspileResult {
-    let source_type = SourceType::from_path(filename)
-        .unwrap_or_default()
-        .with_typescript(true);
-
-    let allocator = Allocator::default();
-    let parser = Parser::new(&allocator, source_text, source_type).parse();
-
-    let decl_ret = IsolatedDeclarations::new(
-        &allocator,
-        OxcIsolatedDeclarationsOptions {
-            strip_internal: false,
-        },
-    )
-    .build(&parser.program);
-
-    if !parser.diagnostics.is_empty() || !decl_ret.diagnostics.is_empty() {
-        let errors = render_errors(
-            filename,
-            source_text,
-            parser.diagnostics.into_iter().chain(decl_ret.diagnostics),
-        );
-        return TranspileResult {
-            code: String::new(),
-            map: None,
-            errors,
-        };
-    }
-
-    TranspileResult {
-        code: Codegen::new().build(&decl_ret.program).code,
-        map: None,
-        errors: vec![],
-    }
 }

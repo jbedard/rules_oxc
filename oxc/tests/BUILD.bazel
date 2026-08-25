@@ -1,30 +1,30 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
-load("//oxc:defs.bzl", "dts_transpiler", "js_transpiler")
+load("//oxc:defs.bzl", "oxc_transpiler")
 
-js_transpiler(
-    name = "js",
+package(default_testonly = True)
+
+oxc_transpiler(
+    name = "transpile",
     srcs = glob([
         "src/*.ts",
         "src/*.mts",
     ]),
+    emit_dts = True,
     out_dir = "dist",
     root_dir = "src",
 )
 
-# One target per file: dts_transpiler does not pre-declare its outputs, so a
-# single-src target is the only way to address one declaration file.
-dts_transpiler(
-    name = "dts_main",
-    srcs = ["src/main.ts"],
-    out_dir = "dist",
-    root_dir = "src",
-)
-
-dts_transpiler(
-    name = "dts_util",
-    srcs = ["src/util.mts"],
-    out_dir = "dist",
-    root_dir = "src",
+# Both .js and .d.ts outputs are pre-declared at load time, so they are
+# addressable as labels by downstream targets (e.g. js_binary entry_point).
+build_test(
+    name = "predeclared_outputs_test",
+    targets = [
+        "dist/main.js",
+        "dist/main.d.ts",
+        "dist/util.mjs",
+        "dist/util.d.mts",
+    ],
 )
 
 diff_test(
@@ -41,12 +41,12 @@ diff_test(
 
 diff_test(
     name = "dts_main_test",
-    file1 = ":dts_main",
+    file1 = "dist/main.d.ts",
     file2 = "golden/main.d.ts.golden",
 )
 
 diff_test(
     name = "dts_util_test",
-    file1 = ":dts_util",
+    file1 = "dist/util.d.mts",
     file2 = "golden/util.d.mts.golden",
 )

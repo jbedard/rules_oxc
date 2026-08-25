@@ -277,7 +277,7 @@ _oxc_transpiler_rule = rule(
         ),
         "_tool": attr.label(
             executable = True,
-            default = "//oxc/private:transpiler",
+            default = "//private/transpiler",
             cfg = "exec",
         ),
     },

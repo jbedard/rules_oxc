@@ -1,0 +1,10 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "transpiler",
+    srcs = ["transpiler.rs"],
+    visibility = ["//oxc:__subpackages__"],
+    deps = [
+        "@oxc_crates//:oxc",
+    ],
+)

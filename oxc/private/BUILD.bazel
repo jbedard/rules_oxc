@@ -1,15 +1,6 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 package(default_visibility = ["//visibility:public"])
-
-rust_binary(
-    name = "transpiler",
-    srcs = ["transpiler.rs"],
-    deps = [
-        "@oxc_crates//:oxc",
-    ],
-)
 
 bzl_library(
     name = "oxc_transpiler",

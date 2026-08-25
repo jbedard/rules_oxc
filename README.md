@@ -5,9 +5,8 @@ Copy this template to create a Bazel ruleset.
 Features:
 
 - follows the official style guide at https://bazel.build/rules/deploying
-- allows for both WORKSPACE.bazel and bzlmod (MODULE.bazel) usage
+- bzlmod (MODULE.bazel) only; requires Bazel 8.6 or greater
 - includes Bazel formatting as a pre-commit hook (using [buildifier])
-- includes stardoc API documentation generator
 - includes typical toolchain setup
 - CI configured with GitHub Actions
 - release using GitHub Actions just by pushing a tag
@@ -36,17 +35,13 @@ Note that users who *do* want to build tools from source should still be able to
 
 ## Installation
 
-From the release you wish to use:
-<https://github.com/myorg/rules_mylang/releases>
-copy the WORKSPACE snippet into your `WORKSPACE` file.
+Requires Bazel 8.6 or greater with bzlmod (WORKSPACE is not supported).
 
-To use a commit rather than a release, you can point at any SHA of the repo.
+Add to your `MODULE.bazel` file:
 
-For example to use commit `abc123`:
+```starlark
+bazel_dep(name = "rules_oxc", version = "0.0.0")
+```
 
-1. Replace `url = "https://github.com/myorg/rules_mylang/releases/download/v0.1.0/rules_mylang-v0.1.0.tar.gz"` with a GitHub-provided source archive like `url = "https://github.com/myorg/rules_mylang/archive/abc123.tar.gz"`
-1. Replace `strip_prefix = "rules_mylang-0.1.0"` with `strip_prefix = "rules_mylang-abc123"`
-1. Update the `sha256`. The easiest way to do this is to comment out the line, then Bazel will
-   print a message with the correct value. Note that GitHub source archives don't have a strong
-   guarantee on the sha256 stability, see
-   <https://github.blog/2023-02-21-update-on-the-future-stability-of-source-code-archives-and-hashes/>
+To use a commit rather than a release, use `archive_override` or `git_override` in
+your `MODULE.bazel`.

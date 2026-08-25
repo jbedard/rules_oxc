@@ -1,0 +1,52 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("//oxc:defs.bzl", "dts_transpiler", "js_transpiler")
+
+js_transpiler(
+    name = "js",
+    srcs = glob([
+        "src/*.ts",
+        "src/*.mts",
+    ]),
+    out_dir = "dist",
+    root_dir = "src",
+)
+
+# One target per file: dts_transpiler does not pre-declare its outputs, so a
+# single-src target is the only way to address one declaration file.
+dts_transpiler(
+    name = "dts_main",
+    srcs = ["src/main.ts"],
+    out_dir = "dist",
+    root_dir = "src",
+)
+
+dts_transpiler(
+    name = "dts_util",
+    srcs = ["src/util.mts"],
+    out_dir = "dist",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "js_main_test",
+    file1 = "dist/main.js",
+    file2 = "golden/main.js.golden",
+)
+
+diff_test(
+    name = "js_util_test",
+    file1 = "dist/util.mjs",
+    file2 = "golden/util.mjs.golden",
+)
+
+diff_test(
+    name = "dts_main_test",
+    file1 = ":dts_main",
+    file2 = "golden/main.d.ts.golden",
+)
+
+diff_test(
+    name = "dts_util_test",
+    file1 = ":dts_util",
+    file2 = "golden/util.d.mts.golden",
+)

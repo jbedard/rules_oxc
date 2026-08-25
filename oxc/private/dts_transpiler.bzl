@@ -99,7 +99,7 @@ dts_transpiler = rule(
             default = [],
             doc = "Source files to be made available to dts",
         ),
-    # TODO(zbarsky): Maybe turn this into a toolchain following the pattern in Aspect's bazel-lib
+        # TODO(zbarsky): Maybe turn this into a toolchain following the pattern in Aspect's bazel-lib
         "out_dir": attr.string(),
         "root_dir": attr.string(),
         "_tool": attr.label(

@@ -2,9 +2,12 @@
 # Take care to document any settings that you expect users to apply.
 # Settings that apply only to CI are in .github/workflows/ci.bazelrc
 
-# Required until this is the default; expected in Bazel 7
-common --enable_bzlmod
 common --lockfile_mode=off
+
+# Modern C++ std library features (std::variant etc.) used by protobuf/abseil
+# are availability-gated below these macOS versions.
+build --macos_minimum_os=12.0
+build --host_macos_minimum_os=12.0
 
 # Don’t want to push a rules author to update their deps if not needed.
 # https://bazel.build/reference/command-line-reference#flag--check_direct_dependencies

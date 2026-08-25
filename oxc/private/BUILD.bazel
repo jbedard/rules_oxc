@@ -12,17 +12,8 @@ rust_binary(
 )
 
 bzl_library(
-    name = "dts_transpiler",
-    srcs = ["dts_transpiler.bzl"],
-    deps = [
-        "@aspect_rules_js//js:providers",
-        "@aspect_rules_ts//ts:defs",
-    ],
-)
-
-bzl_library(
-    name = "js_transpiler",
-    srcs = ["js_transpiler.bzl"],
+    name = "oxc_transpiler",
+    srcs = ["oxc_transpiler.bzl"],
     deps = [
         "@aspect_rules_js//js:providers",
         "@aspect_rules_ts//ts:defs",

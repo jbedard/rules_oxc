@@ -1,17 +1,30 @@
-"""Provides a simple way to test your rules as an external workspace.
-Add a basic smoke-test target below.
-"""
+"""Exercises rules_oxc from an end-user's perspective."""
 
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
-# load("@com_myorg_rules_mylang//mylang:defs.bzl", "...")
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@rules_oxc//oxc:defs.bzl", "dts_transpiler", "js_transpiler")
 
-# Replace with a usage of your rule/macro
-filegroup(name = "empty")
+js_transpiler(
+    name = "js",
+    srcs = ["src/main.ts"],
+    out_dir = "dist",
+    root_dir = "src",
+)
 
-build_test(
-    name = "smoke_test",
-    targets = [
-        # targets you add above
-        ":empty",
-    ],
+dts_transpiler(
+    name = "dts",
+    srcs = ["src/main.ts"],
+    out_dir = "dist",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "js_test",
+    file1 = "dist/main.js",
+    file2 = "golden/main.js.golden",
+)
+
+diff_test(
+    name = "dts_test",
+    file1 = ":dts",
+    file2 = "golden/main.d.ts.golden",
 )

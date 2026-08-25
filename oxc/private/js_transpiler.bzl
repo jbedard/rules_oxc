@@ -191,7 +191,7 @@ _js_transpiler_rule = rule(
         ),
         "_tool": attr.label(
             executable = True,
-            default = "//build/rules/ts/oxc/transpiler",
+            default = "//oxc/private:transpiler",
             cfg = "exec",
         ),
     },

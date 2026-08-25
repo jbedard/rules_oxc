@@ -1,0 +1,66 @@
+# Builds the transpiler binary from the isolated private/transpiler module for
+# each supported platform and publishes them to a GitHub release.
+#
+# Trigger by pushing a tag like `transpiler-v0.0.1`. The main MODULE.bazel
+# references these binaries by version via http_file; bump TRANSPILER_VERSION
+# and the sha256 pins there after publishing.
+name: Release transpiler
+
+on:
+  push:
+    tags:
+      - "transpiler-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.platform.triple }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { triple: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+          - { triple: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { triple: aarch64-apple-darwin, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: transpiler-release-${{ matrix.platform.triple }}
+          repository-cache: true
+
+      - name: bazel build //:transpiler
+        working-directory: private/transpiler
+        run: bazel build --compilation_mode=opt //:transpiler
+
+      - name: rename binary
+        working-directory: private/transpiler
+        run: cp bazel-bin/transpiler transpiler-${{ matrix.platform.triple }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transpiler-${{ matrix.platform.triple }}
+          path: private/transpiler/transpiler-${{ matrix.platform.triple }}
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --repo ${{ github.repository }} \
+            --title ${{ github.ref_name }} \
+            --notes "Prebuilt transpiler binaries for rules_oxc." \
+            transpiler-*

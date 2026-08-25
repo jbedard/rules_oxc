@@ -325,3 +325,161 @@ fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_options() -> Options {
+        Options {
+            emit_js: true,
+            emit_dts: true,
+            rewrite_extensions: false,
+            source_maps: false,
+        }
+    }
+
+    #[test]
+    fn js_ext_mapping() {
+        assert_eq!(js_ext_for("ts"), "js");
+        assert_eq!(js_ext_for("tsx"), "js");
+        assert_eq!(js_ext_for("mts"), "mjs");
+        assert_eq!(js_ext_for("cts"), "cjs");
+    }
+
+    #[test]
+    fn transpile_strips_types() {
+        let result = transpile(
+            "a.ts",
+            "export const x: number = 1;\nexport interface I { a: string }\n",
+            &default_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("export const x = 1"), "js: {js}");
+        assert!(!js.contains("interface"), "js: {js}");
+    }
+
+    #[test]
+    fn transpile_emits_declarations() {
+        let result = transpile(
+            "a.ts",
+            "export function add(a: number, b: number): number { return a + b; }\n",
+            &default_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let dts = result.dts_code.unwrap();
+        assert!(
+            dts.contains("export declare function add(a: number, b: number): number"),
+            "dts: {dts}"
+        );
+        assert!(!dts.contains("return"), "dts: {dts}");
+    }
+
+    #[test]
+    fn transpile_reports_parse_errors() {
+        let result = transpile("bad.ts", "const = ;", &default_options());
+        assert!(!result.errors.is_empty());
+        assert!(result.js_code.is_none());
+        assert!(result.dts_code.is_none());
+    }
+
+    #[test]
+    fn transpile_reports_isolated_declaration_errors() {
+        // Inferred return type is not allowed under isolated declarations.
+        let result = transpile(
+            "a.ts",
+            "export function f() { return someValue(); }\nfunction someValue() { return 1; }\n",
+            &default_options(),
+        );
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn transpile_removes_class_fields_without_initializer() {
+        let result = transpile(
+            "a.ts",
+            "export class C { declared: number; assigned = 1; }\n",
+            &default_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("declared"), "js: {js}");
+        assert!(js.contains("assigned = 1"), "js: {js}");
+    }
+
+    #[test]
+    fn source_maps_emitted_when_enabled() {
+        let options = Options {
+            source_maps: true,
+            ..default_options()
+        };
+        let result = transpile("a.ts", "export const x: number = 1;\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let map = result.js_map.unwrap();
+        assert!(map.contains("\"a.ts\""), "map: {map}");
+    }
+
+    #[test]
+    fn rewrite_extensions_rewrites_ts_imports() {
+        let options = Options {
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let result = transpile(
+            "a.ts",
+            "import { b } from \"./b.ts\";\nexport const x: number = b;\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"./b.js\""), "js: {js}");
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let base = std::env::var_os("TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_specifier_ignores_bare_and_extensioned() {
+        let dir = test_dir("resolve_ignores");
+        assert_eq!(resolve_specifier(&dir, "lodash"), None);
+        assert_eq!(resolve_specifier(&dir, "./b.js"), None);
+        assert_eq!(resolve_specifier(&dir, "./b.ts"), None);
+    }
+
+    #[test]
+    fn resolve_specifier_resolves_sibling_file() {
+        let dir = test_dir("resolve_sibling");
+        fs::write(dir.join("b.ts"), "").unwrap();
+        fs::write(dir.join("c.mts"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./c"), Some("./c.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./missing"), None);
+    }
+
+    #[test]
+    fn resolve_specifier_resolves_directory_index() {
+        let dir = test_dir("resolve_index");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/index.ts"), "").unwrap();
+        assert_eq!(
+            resolve_specifier(&dir, "./sub"),
+            Some("./sub/index.js".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_specifier_prefers_file_over_index() {
+        let dir = test_dir("resolve_prefers_file");
+        fs::write(dir.join("b.ts"), "").unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("b/index.ts"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
+    }
+}

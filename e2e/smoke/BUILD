@@ -27,11 +27,11 @@ build_test(
 diff_test(
     name = "js_test",
     file1 = "dist/main.js",
-    file2 = "golden/main.js.golden",
+    file2 = "snapshots/main.js",
 )
 
 diff_test(
     name = "dts_test",
     file1 = "dist/main.d.ts",
-    file2 = "golden/main.d.ts.golden",
+    file2 = "snapshots/main.d.ts",
 )

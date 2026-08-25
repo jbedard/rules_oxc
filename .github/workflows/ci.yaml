@@ -24,6 +24,7 @@ jobs:
         workspace:
           - { path: ., slug: root }
           - { path: e2e/smoke, slug: e2e-smoke }
+          - { path: e2e/ts_project, slug: e2e-ts-project }
         bazel:
           # 8.6.0 is the minimum supported version; 9.x is the latest Bazel 9 release.
           - { id: bazel-8, version: 8.6.0 }

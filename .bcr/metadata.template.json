@@ -1,6 +1,13 @@
 {
   "homepage": "https://github.com/aspect-build/rules_oxc",
-  "maintainers": [],
+  "maintainers": [
+    {
+      "name": "Jason Bedard",
+      "email": "jason@aspect.build",
+      "github": "jbedard",
+      "github_user_id": 89246
+    }
+  ],
   "repository": ["github:aspect-build/rules_oxc"],
   "versions": [],
   "yanked_versions": {}

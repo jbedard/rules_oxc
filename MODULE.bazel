@@ -14,6 +14,10 @@ bazel_dep(name = "aspect_rules_js", version = "3.0.1")
 
 # For ts_lib.files_relative_to_package()
 bazel_dep(name = "aspect_rules_ts", version = "3.9.1")
+bazel_dep(name = "aspect_tools_telemetry", version = "0.5.2")
+
+tel = use_extension("@aspect_tools_telemetry//:extension.bzl", "telemetry")
+use_repo(tel, "aspect_tools_telemetry_report")
 
 bazel_dep(name = "gazelle", version = "0.53.0", dev_dependency = True)
 bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.8.2", dev_dependency = True)

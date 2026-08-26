@@ -1,2 +1,10 @@
 # Snapshot files are generated from build outputs.
 **/snapshots/** linguist-generated=true
+
+# Exclude internal-only directories from release archives (git archive in
+# release_prep.sh). Everything under e2e/ is excluded except e2e/smoke.
+/transpiler export-ignore
+/transpiler/** export-ignore
+/e2e/** export-ignore
+/e2e/smoke -export-ignore
+/e2e/smoke/** -export-ignore

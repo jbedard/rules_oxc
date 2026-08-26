@@ -37,7 +37,7 @@ config_setting(
 )
 
 # Prebuilt transpiler binary for the current platform, built from the isolated
-# private/transpiler module and fetched via http_file in MODULE.bazel.
+# transpiler/ module and fetched via http_file in MODULE.bazel.
 # Used with cfg = "exec", so the select() resolves against the exec platform.
 native_binary(
     name = "transpiler",

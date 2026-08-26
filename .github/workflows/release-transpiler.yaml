@@ -1,4 +1,4 @@
-# Builds the transpiler binary from the isolated private/transpiler module for
+# Builds the transpiler binary from the isolated transpiler/ module for
 # each supported platform and publishes them to a GitHub release.
 #
 # Trigger by pushing a tag like `transpiler-v0.0.1`. The main MODULE.bazel
@@ -35,17 +35,17 @@ jobs:
           repository-cache: true
 
       - name: bazel build //:transpiler
-        working-directory: private/transpiler
+        working-directory: transpiler
         run: bazel build --compilation_mode=opt //:transpiler
 
       - name: rename binary
-        working-directory: private/transpiler
+        working-directory: transpiler
         run: cp bazel-bin/transpiler transpiler-${{ matrix.platform.triple }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: transpiler-${{ matrix.platform.triple }}
-          path: private/transpiler/transpiler-${{ matrix.platform.triple }}
+          path: transpiler/transpiler-${{ matrix.platform.triple }}
 
   release:
     needs: [build]

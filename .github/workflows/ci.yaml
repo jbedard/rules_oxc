@@ -31,7 +31,7 @@ jobs:
           - { id: bazel-9, version: 9.x }
         include:
           # The transpiler module is internal-only: test it only on its pinned .bazelversion
-          - workspace: { path: private/transpiler, slug: transpiler }
+          - workspace: { path: transpiler, slug: transpiler }
     env:
       USE_BAZEL_VERSION: ${{ matrix.bazel.version }}
     steps:

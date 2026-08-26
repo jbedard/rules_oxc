@@ -1,10 +1,17 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_binary(
     name = "transpiler",
     srcs = ["transpiler.rs"],
-    visibility = ["//oxc:__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = [
         "@oxc_crates//:oxc",
     ],
+)
+
+rust_test(
+    name = "transpiler_test",
+    size = "small",
+    crate = ":transpiler",
 )

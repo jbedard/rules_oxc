@@ -106,3 +106,43 @@ diff_test(
     file1 = "dist/util.d.mts",
     file2 = "snapshots/util.d.mts",
 )
+
+# Explicit relative extensions on imports (e.g. "./target_ts.ts") are left
+# untouched by default, matching tsc's/swc's out-of-the-box behavior.
+_REWRITE_EXTENSIONS_SRCS = [
+    "src/rewrite_extensions/main.ts",
+    "src/rewrite_extensions/target_cts.cts",
+    "src/rewrite_extensions/target_mts.mts",
+    "src/rewrite_extensions/target_ts.ts",
+    "src/rewrite_extensions/target_tsx.tsx",
+]
+
+oxc_transpiler(
+    name = "transpile_rewrite_extensions_off",
+    srcs = _REWRITE_EXTENSIONS_SRCS,
+    out_dir = "rewrite_off",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "rewrite_extensions_off_test",
+    file1 = "rewrite_off/rewrite_extensions/main.js",
+    file2 = "snapshots/main_extensions_off.js",
+)
+
+# With rewrite_extensions, ".ts"/".tsx"/".mts"/".cts" specifiers are rewritten
+# to their emitted JS extension, mirroring tsc's rewriteRelativeImportExtensions
+# and swc's jsc.rewriteRelativeImportExtensions.
+oxc_transpiler(
+    name = "transpile_rewrite_extensions_on",
+    srcs = _REWRITE_EXTENSIONS_SRCS,
+    out_dir = "rewrite_on",
+    rewrite_extensions = True,
+    root_dir = "src",
+)
+
+diff_test(
+    name = "rewrite_extensions_on_test",
+    file1 = "rewrite_on/rewrite_extensions/main.js",
+    file2 = "snapshots/main_extensions_on.js",
+)

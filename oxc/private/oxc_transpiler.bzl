@@ -141,6 +141,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--source-maps")
         if ctx.attr.preserve_jsx:
             args.add("--preserve-jsx")
+        if ctx.attr.rewrite_extensions:
+            args.add("--rewrite-extensions")
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
@@ -308,6 +310,14 @@ _oxc_transpiler_rule = rule(
                   "jsx-runtime calls, like tsc's jsx=preserve. Types are still " +
                   "stripped, and .tsx/.jsx sources produce .jsx outputs.",
         ),
+        "rewrite_extensions": attr.bool(
+            default = False,
+            doc = "Rewrite relative import/export specifiers that already end in " +
+                  "'.ts', '.tsx', '.mts', or '.cts' to their emitted JS extension, " +
+                  "like tsc's rewriteRelativeImportExtensions and swc's " +
+                  "jsc.rewriteRelativeImportExtensions. Specifiers with other " +
+                  "extensions (e.g. '.js') are left untouched.",
+        ),
         "_tool": attr.label(
             executable = True,
             default = "//oxc/private:transpiler",
@@ -325,6 +335,7 @@ def oxc_transpiler(
         emit_dts = False,
         source_maps = False,
         preserve_jsx = False,
+        rewrite_extensions = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -339,5 +350,6 @@ def oxc_transpiler(
         emit_dts = emit_dts,
         source_maps = source_maps or False,
         preserve_jsx = preserve_jsx or False,
+        rewrite_extensions = rewrite_extensions or False,
         **kwargs
     )

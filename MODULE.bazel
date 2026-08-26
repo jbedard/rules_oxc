@@ -24,25 +24,25 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = Tr
 # happens in //oxc/private:transpiler.
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
-TRANSPILER_VERSION = "0.0.3"
+TRANSPILER_VERSION = "0.0.4"
 
 http_file(
     name = "transpiler_aarch64_apple_darwin",
     executable = True,
-    sha256 = "57da96f01c785e70c5913937cf245deafcb6690893b04bbcb372f41e81945e7a",
+    sha256 = "d7706bada72511e6fbfd6066b51646b15ae22f763f189444a9f2bad0464226f5",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-apple-darwin",
 )
 
 http_file(
     name = "transpiler_aarch64_unknown_linux_gnu",
     executable = True,
-    sha256 = "6cd70f3480e12529f994947536f4ede5c8c78048f3da779e7037cf61d213276c",
+    sha256 = "a9fa9f9fe58861e1fd9aa663f3ac461352edbc9b573b2242ba28ec9d745027fc",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-unknown-linux-gnu",
 )
 
 http_file(
     name = "transpiler_x86_64_unknown_linux_gnu",
     executable = True,
-    sha256 = "089b878371927a83f2786e852503bd7c3641eec0fcb4ffe018987f4a33f5078d",
+    sha256 = "db3a4005fecfcbea61e965f42f33d550beafb813595b4e123c2e5effc92145f2",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-x86_64-unknown-linux-gnu",
 )

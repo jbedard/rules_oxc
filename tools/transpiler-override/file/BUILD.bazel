@@ -1,0 +1,9 @@
+# Mimics the layout of an http_file repo: the target //file resolves to the
+# binary. Populate with tools/local-transpiler.sh, or manually:
+#   cd transpiler && bazel build //:transpiler
+#   cp transpiler/bazel-bin/transpiler tools/transpiler-override/file/transpiler
+filegroup(
+    name = "file",
+    srcs = ["transpiler"],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,4 @@
+# Marks this directory as a standalone repo. Used by --config=local-transpiler
+# to replace the prebuilt transpiler http_file repos with a locally built
+# binary, without pulling the transpiler module's dependencies (rules_rs,
+# llvm, ...) into the module graph. See tools/local-transpiler.sh.

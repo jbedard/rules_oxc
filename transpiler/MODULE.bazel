@@ -8,7 +8,7 @@ with http_file. See .github/workflows/release-transpiler.yaml.
 module(
     name = "aspect_rules_oxc_transpiler",
     version = "0.0.0",
-    bazel_compatibility = [">=9.2.0"],
+    bazel_compatibility = [">=8.6.0"],
 )
 
 bazel_dep(name = "rules_rs", version = "0.0.107")

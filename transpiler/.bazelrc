@@ -1,5 +1,3 @@
-common --lockfile_mode=off
-
 # Modern C++ std library features (std::variant etc.) used by protobuf/abseil
 # are availability-gated below these macOS versions.
 build --macos_minimum_os=12.0

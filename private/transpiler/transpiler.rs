@@ -8,15 +8,17 @@ use oxc::isolated_declarations::{
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
-use oxc::transformer::{CompilerAssumptions, TransformOptions, Transformer, TypeScriptOptions};
+use oxc::transformer::{
+    CompilerAssumptions, JsxOptions, TransformOptions, Transformer, TypeScriptOptions,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 struct Options {
     emit_js: bool,
     emit_dts: bool,
-    rewrite_extensions: bool,
     source_maps: bool,
+    preserve_jsx: bool,
 }
 
 struct Entry {
@@ -29,8 +31,8 @@ fn main() {
     let mut options = Options {
         emit_js: false,
         emit_dts: false,
-        rewrite_extensions: false,
         source_maps: false,
+        preserve_jsx: false,
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -40,8 +42,8 @@ fn main() {
         match arg.as_str() {
             "--emit-js" => options.emit_js = true,
             "--emit-dts" => options.emit_dts = true,
-            "--rewrite-extensions" => options.rewrite_extensions = true,
             "--source-maps" => options.source_maps = true,
+            "--preserve-jsx" => options.preserve_jsx = true,
             "--manifest" => {
                 manifest_path = Some(args_iter.next().unwrap_or_else(|| {
                     eprintln!("error: --manifest requires a file path");
@@ -59,6 +61,8 @@ fn main() {
 
     // Each manifest entry is the source path followed by the JS output path
     // (when --emit-js) and the declaration output path (when --emit-dts).
+    // An empty output path means that output is skipped for the entry
+    // (e.g. no declarations for plain JS sources).
     let entry_width = 1 + options.emit_js as usize + options.emit_dts as usize;
 
     let lines: Vec<String> = if let Some(path) = manifest_path {
@@ -85,8 +89,14 @@ fn main() {
             let mut outs = chunk[1..].iter();
             Entry {
                 src: chunk[0].clone(),
-                js_out: options.emit_js.then(|| outs.next().unwrap().clone()),
-                dts_out: options.emit_dts.then(|| outs.next().unwrap().clone()),
+                js_out: options
+                    .emit_js
+                    .then(|| outs.next().unwrap().clone())
+                    .filter(|out| !out.is_empty()),
+                dts_out: options
+                    .emit_dts
+                    .then(|| outs.next().unwrap().clone())
+                    .filter(|out| !out.is_empty()),
             }
         })
         .collect();
@@ -108,7 +118,13 @@ fn main() {
             continue;
         }
 
-        let result = transpile(&entry.src, &content, &options);
+        let entry_options = Options {
+            emit_js: entry.js_out.is_some(),
+            emit_dts: entry.dts_out.is_some(),
+            source_maps: options.source_maps,
+            preserve_jsx: options.preserve_jsx,
+        };
+        let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
             all_errors.extend(result.errors);
             continue;
@@ -219,10 +235,13 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             },
             typescript: TypeScriptOptions {
                 remove_class_fields_without_initializer: true,
-                rewrite_import_extensions: options
-                    .rewrite_extensions
-                    .then_some(oxc::transformer::RewriteExtensionsMode::Rewrite),
                 ..Default::default()
+            },
+            // Like tsc's jsx=preserve: strip types but leave JSX untouched.
+            jsx: if options.preserve_jsx {
+                JsxOptions::disable()
+            } else {
+                JsxOptions::default()
             },
             ..Default::default()
         };
@@ -239,7 +258,12 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             return result;
         }
 
-        resolve_extensionless_specifiers(&mut parser_ret.program, &allocator, Path::new(filename));
+        resolve_extensionless_specifiers(
+            &mut parser_ret.program,
+            &allocator,
+            Path::new(filename),
+            options.preserve_jsx,
+        );
 
         let mut codegen = Codegen::new();
         if options.source_maps {
@@ -267,6 +291,7 @@ fn resolve_extensionless_specifiers<'a>(
     program: &mut Program<'a>,
     allocator: &'a Allocator,
     filename: &Path,
+    preserve_jsx: bool,
 ) {
     let base_dir = filename.parent().unwrap_or_else(|| Path::new(""));
 
@@ -282,29 +307,31 @@ fn resolve_extensionless_specifiers<'a>(
             continue;
         };
 
-        if let Some(resolved) = resolve_specifier(base_dir, source.value.as_str()) {
+        if let Some(resolved) = resolve_specifier(base_dir, source.value.as_str(), preserve_jsx) {
             source.value = allocator.alloc_str(&resolved).into();
             source.raw = None;
         }
     }
 }
 
-const RESOLVABLE_EXTS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
+// TypeScript sources first: with both foo.ts and foo.js present, tsc
+// resolves "./foo" to foo.ts.
+const RESOLVABLE_EXTS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
-fn js_ext_for(ts_ext: &str) -> &'static str {
-    match ts_ext {
-        "mts" => "mjs",
-        "cts" => "cjs",
+fn js_ext_for(src_ext: &str, preserve_jsx: bool) -> &'static str {
+    match src_ext {
+        "mts" | "mjs" => "mjs",
+        "cts" | "cjs" => "cjs",
+        "tsx" | "jsx" if preserve_jsx => "jsx",
         _ => "js",
     }
 }
 
-fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
+fn resolve_specifier(base_dir: &Path, specifier: &str, preserve_jsx: bool) -> Option<String> {
     if !specifier.starts_with("./") && !specifier.starts_with("../") {
         return None;
     }
-    // Already has an extension: either already resolvable as-is, or handled by
-    // the TypeScript extension rewriter above.
+    // Already has an extension: leave as-is.
     if Path::new(specifier).extension().is_some() {
         return None;
     }
@@ -313,13 +340,16 @@ fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
 
     for ext in RESOLVABLE_EXTS {
         if target.with_extension(ext).is_file() {
-            return Some(format!("{specifier}.{}", js_ext_for(ext)));
+            return Some(format!("{specifier}.{}", js_ext_for(ext, preserve_jsx)));
         }
     }
 
     for ext in RESOLVABLE_EXTS {
         if target.join(format!("index.{ext}")).is_file() {
-            return Some(format!("{specifier}/index.{}", js_ext_for(ext)));
+            return Some(format!(
+                "{specifier}/index.{}",
+                js_ext_for(ext, preserve_jsx)
+            ));
         }
     }
 
@@ -334,17 +364,24 @@ mod tests {
         Options {
             emit_js: true,
             emit_dts: true,
-            rewrite_extensions: false,
             source_maps: false,
+            preserve_jsx: false,
         }
     }
 
     #[test]
     fn js_ext_mapping() {
-        assert_eq!(js_ext_for("ts"), "js");
-        assert_eq!(js_ext_for("tsx"), "js");
-        assert_eq!(js_ext_for("mts"), "mjs");
-        assert_eq!(js_ext_for("cts"), "cjs");
+        assert_eq!(js_ext_for("ts", false), "js");
+        assert_eq!(js_ext_for("tsx", false), "js");
+        assert_eq!(js_ext_for("mts", false), "mjs");
+        assert_eq!(js_ext_for("cts", false), "cjs");
+        assert_eq!(js_ext_for("js", false), "js");
+        assert_eq!(js_ext_for("jsx", false), "js");
+        assert_eq!(js_ext_for("mjs", false), "mjs");
+        assert_eq!(js_ext_for("cjs", false), "cjs");
+        assert_eq!(js_ext_for("tsx", true), "jsx");
+        assert_eq!(js_ext_for("jsx", true), "jsx");
+        assert_eq!(js_ext_for("ts", true), "js");
     }
 
     #[test]
@@ -421,19 +458,66 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_extensions_rewrites_ts_imports() {
+    fn transpile_plain_js() {
         let options = Options {
-            rewrite_extensions: true,
+            emit_dts: false,
+            ..default_options()
+        };
+        let result = transpile("a.js", "export const x = 1;\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("export const x = 1"), "js: {js}");
+        assert!(result.dts_code.is_none());
+    }
+
+    #[test]
+    fn transpile_transforms_jsx() {
+        let options = Options {
+            emit_dts: false,
             ..default_options()
         };
         let result = transpile(
-            "a.ts",
-            "import { b } from \"./b.ts\";\nexport const x: number = b;\n",
+            "a.tsx",
+            "export const el: object = <div id={1} />;\n",
             &options,
         );
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let js = result.js_code.unwrap();
-        assert!(js.contains("\"./b.js\""), "js: {js}");
+        assert!(js.contains("react/jsx-runtime"), "js: {js}");
+        assert!(js.contains("_jsx("), "js: {js}");
+        assert!(!js.contains(": object"), "js: {js}");
+    }
+
+    #[test]
+    fn transpile_transforms_jsx_in_plain_jsx_file() {
+        let options = Options {
+            emit_dts: false,
+            ..default_options()
+        };
+        let result = transpile("a.jsx", "export const el = <div id={1} />;\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("_jsx("), "js: {js}");
+    }
+
+    #[test]
+    fn preserve_jsx_keeps_jsx_syntax() {
+        let options = Options {
+            emit_dts: false,
+            preserve_jsx: true,
+            ..default_options()
+        };
+        let result = transpile(
+            "a.tsx",
+            "export const el: object = <div id={1} />;\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("<div"), "js: {js}");
+        assert!(!js.contains("_jsx("), "js: {js}");
+        assert!(!js.contains("react/jsx-runtime"), "js: {js}");
+        assert!(!js.contains(": object"), "js: {js}");
     }
 
     fn test_dir(name: &str) -> PathBuf {
@@ -448,9 +532,9 @@ mod tests {
     #[test]
     fn resolve_specifier_ignores_bare_and_extensioned() {
         let dir = test_dir("resolve_ignores");
-        assert_eq!(resolve_specifier(&dir, "lodash"), None);
-        assert_eq!(resolve_specifier(&dir, "./b.js"), None);
-        assert_eq!(resolve_specifier(&dir, "./b.ts"), None);
+        assert_eq!(resolve_specifier(&dir, "lodash", false), None);
+        assert_eq!(resolve_specifier(&dir, "./b.js", false), None);
+        assert_eq!(resolve_specifier(&dir, "./b.ts", false), None);
     }
 
     #[test]
@@ -458,9 +542,21 @@ mod tests {
         let dir = test_dir("resolve_sibling");
         fs::write(dir.join("b.ts"), "").unwrap();
         fs::write(dir.join("c.mts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./c"), Some("./c.mjs".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./missing"), None);
+        fs::write(dir.join("d.jsx"), "").unwrap();
+        fs::write(dir.join("e.cjs"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./b", false), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./c", false), Some("./c.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./d", false), Some("./d.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./e", false), Some("./e.cjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./missing", false), None);
+    }
+
+    #[test]
+    fn resolve_specifier_prefers_ts_over_js() {
+        let dir = test_dir("resolve_prefers_ts");
+        fs::write(dir.join("b.mts"), "").unwrap();
+        fs::write(dir.join("b.js"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./b", false), Some("./b.mjs".to_string()));
     }
 
     #[test]
@@ -469,7 +565,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/index.ts"), "").unwrap();
         assert_eq!(
-            resolve_specifier(&dir, "./sub"),
+            resolve_specifier(&dir, "./sub", false),
             Some("./sub/index.js".to_string())
         );
     }
@@ -480,6 +576,6 @@ mod tests {
         fs::write(dir.join("b.ts"), "").unwrap();
         fs::create_dir_all(dir.join("b")).unwrap();
         fs::write(dir.join("b/index.ts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./b", false), Some("./b.js".to_string()));
     }
 }

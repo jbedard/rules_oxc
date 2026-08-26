@@ -1,7 +1,7 @@
 {
-  "homepage": "https://github.com/jbedard/rules_oxc",
+  "homepage": "https://github.com/aspect-build/rules_oxc",
   "maintainers": [],
-  "repository": ["github:jbedard/rules_oxc"],
+  "repository": ["github:aspect-build/rules_oxc"],
   "versions": [],
   "yanked_versions": {}
 }

@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 path = "dummy.rs" # We just need this for Cargo to generate the Cargo.lock
 
 [dependencies]
-oxc = { version = "0.140.0", features = [
+oxc = { version = "0.147.0", features = [
   "codegen",
   "isolated_declarations",
   "semantic",

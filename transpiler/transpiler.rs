@@ -298,7 +298,7 @@ fn resolve_extensionless_specifiers<'a>(
     for stmt in program.body.iter_mut() {
         let source = match stmt {
             Statement::ImportDeclaration(decl) => Some(&mut decl.source),
-            Statement::ExportNamedDeclaration(decl) => decl.source.as_mut(),
+            Statement::ExportFromDeclaration(decl) => Some(&mut decl.source),
             Statement::ExportAllDeclaration(decl) => Some(&mut decl.source),
             _ => None,
         };

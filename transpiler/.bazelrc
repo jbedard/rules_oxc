@@ -6,3 +6,9 @@ build --macos_minimum_os=12.0
 build --host_macos_minimum_os=12.0
 
 common --check_direct_dependencies=off
+
+# This module only exists to build the published transpiler binary, so always
+# build fully optimized: opt mode, fat LTO, single codegen unit.
+build --compilation_mode=opt
+build --@rules_rust//rust/settings:lto=fat
+build --@rules_rust//rust/settings:codegen_units=1

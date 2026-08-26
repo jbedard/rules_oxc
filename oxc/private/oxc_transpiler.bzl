@@ -6,20 +6,32 @@ load("@aspect_rules_js//js:providers.bzl", "JsInfo")
 load("@aspect_rules_ts//ts/private:ts_lib.bzl", "lib")
 
 # Output extension for each input extension.
-# .ts/.tsx default to .js/.d.ts; explicit entries cover the module-type variants.
+# .ts/.tsx/.jsx default to .js: JSX is transformed (automatic runtime), so
+# like tsc's jsx=react-jsx the output is plain JS. Explicit entries cover the
+# module-type variants and .js, which keep their own name.
 _JS_EXT_MAP = {
     ".cts": ".cjs",
     ".cjs": ".cjs",
     ".mts": ".mjs",
     ".mjs": ".mjs",
+    ".js": ".js",
+}
+
+# With preserve_jsx (tsc's jsx=preserve) the output still contains JSX
+# syntax, so the JS output of .tsx/.jsx keeps the .jsx extension.
+_JS_EXT_MAP_PRESERVE_JSX = _JS_EXT_MAP | {
+    ".tsx": ".jsx",
+    ".jsx": ".jsx",
 }
 
 _DTS_EXT_MAP = {
     ".cts": ".d.cts",
-    ".cjs": ".d.cts",
     ".mts": ".d.mts",
-    ".mjs": ".d.mts",
 }
+
+# Plain JS inputs: transpiled (JSX transform, specifier resolution, source
+# maps) but produce no declarations, having no type annotations.
+_PLAIN_JS_EXTS = (".js", ".jsx", ".mjs", ".cjs")
 
 def _is_declaration(path):
     return path.endswith(".d.ts") or path.endswith(".d.mts") or path.endswith(".d.cts")
@@ -39,7 +51,7 @@ def _out_path(src, out_dir, root_dir):
         src = out_dir + "/" + src
     return src
 
-def _to_js_out(src, allow_js, out_dir, root_dir):
+def _to_js_out(src, preserve_jsx, out_dir, root_dir):
     """Return the JS output path for a source path, or None to skip it."""
     path = src[src.find(":") + 1:]
 
@@ -49,11 +61,15 @@ def _to_js_out(src, allow_js, out_dir, root_dir):
     ext_idx = path.rindex(".")
     src_ext = path[ext_idx:]
 
-    if src_ext in (".js", ".jsx"):
-        return _out_path(path, out_dir, root_dir) if allow_js else None
-
-    out_ext = _JS_EXT_MAP.get(src_ext, ".js")
-    return _out_path(path[:ext_idx] + out_ext, out_dir, root_dir)
+    ext_map = _JS_EXT_MAP_PRESERVE_JSX if preserve_jsx else _JS_EXT_MAP
+    out_ext = ext_map.get(src_ext, ".js")
+    out = _out_path(path[:ext_idx] + out_ext, out_dir, root_dir)
+    if out == path:
+        fail(
+            "The src \"{}\" would produce an output with the same path as the input. ".format(path) +
+            "Set out_dir to write outputs to a different directory.",
+        )
+    return out
 
 def _to_dts_out(src, out_dir, root_dir):
     """Return the declaration output path for a source path, or None to skip it."""
@@ -66,7 +82,7 @@ def _to_dts_out(src, out_dir, root_dir):
     src_ext = path[ext_idx:]
 
     # Plain JS has no type annotations to emit declarations from.
-    if src_ext in (".js", ".jsx"):
+    if src_ext in _PLAIN_JS_EXTS:
         return None
 
     out_ext = _DTS_EXT_MAP.get(src_ext, ".d.ts")
@@ -95,25 +111,28 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
 
     Each manifest entry is the source path followed by its JS output path
     (when emitting JS) and its declaration output path (when emitting dts).
+    A dts entry may be None (plain JS sources), written as an empty line.
     """
+    emit_dts = ctx.attr.emit_dts and any(dts_outs)
+
     manifest_lines = []
     for i in range(len(srcs)):
         manifest_lines.append(srcs[i].path)
         if js_outs:
             manifest_lines.append(js_outs[i].path)
-        if dts_outs:
-            manifest_lines.append(dts_outs[i].path)
+        if emit_dts:
+            manifest_lines.append(dts_outs[i].path if dts_outs[i] else "")
     manifest = ctx.actions.declare_file(ctx.label.name + "_manifest.txt")
     ctx.actions.write(manifest, "\n".join(manifest_lines) + "\n")
 
     args = ctx.actions.args()
     if js_outs:
         args.add("--emit-js")
-        if ctx.attr.rewrite_extensions:
-            args.add("--rewrite-extensions")
         if ctx.attr.source_maps:
             args.add("--source-maps")
-    if dts_outs:
+        if ctx.attr.preserve_jsx:
+            args.add("--preserve-jsx")
+    if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
     args.add(manifest)
@@ -123,7 +142,7 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
         arguments = [args],
         mnemonic = "OxcTranspile",
         executable = ctx.executable._tool,
-        outputs = js_outs + dts_outs + map_outs,
+        outputs = js_outs + [out for out in dts_outs if out] + map_outs,
         execution_requirements = {"supports-path-mapping": "1"},
     )
 
@@ -161,28 +180,17 @@ def _oxc_transpiler_impl(ctx):
 
         ext_idx = src_path.rindex(".")
         src_ext = src_path[ext_idx:]
+        is_plain_js = src_ext in _PLAIN_JS_EXTS
 
-        # Plain JS/JSX files are copied through when allow_js is set; no declarations.
-        if src_ext in (".js", ".jsx"):
-            if not (ctx.attr.emit_js and ctx.attr.allow_js):
-                continue
-            out_path = lib.to_out_path(src_path, ctx.attr.out_dir, ctx.attr.root_dir)
-            out = _declare(ctx, predeclared, out_path)
-            ctx.actions.run_shell(
-                inputs = [src],
-                outputs = [out],
-                mnemonic = "CopyJs",
-                command = "cp \"$1\" \"$2\"",
-                arguments = [src.path, out.path],
-                execution_requirements = {"supports-path-mapping": "1"},
-            )
-            js_outs.append(out)
+        # Plain JS produces no declarations, so without JS emit it has no outputs.
+        if is_plain_js and not ctx.attr.emit_js:
             continue
 
         transpile_srcs.append(src)
 
         if ctx.attr.emit_js:
-            out_path = src_path[:ext_idx] + _JS_EXT_MAP.get(src_ext, ".js")
+            ext_map = _JS_EXT_MAP_PRESERVE_JSX if ctx.attr.preserve_jsx else _JS_EXT_MAP
+            out_path = src_path[:ext_idx] + ext_map.get(src_ext, ".js")
             out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
             out = _declare(ctx, predeclared, out_path)
             js_outs.append(out)
@@ -192,11 +200,14 @@ def _oxc_transpiler_impl(ctx):
                 map_outs.append(map_out)
 
         if ctx.attr.emit_dts:
-            out_path = src_path[:ext_idx] + _DTS_EXT_MAP.get(src_ext, ".d.ts")
-            out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
-            out = _declare(ctx, predeclared, out_path)
-            dts_outs.append(out)
-            transpile_dts_outs.append(out)
+            if is_plain_js:
+                transpile_dts_outs.append(None)
+            else:
+                out_path = src_path[:ext_idx] + _DTS_EXT_MAP.get(src_ext, ".d.ts")
+                out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
+                out = _declare(ctx, predeclared, out_path)
+                dts_outs.append(out)
+                transpile_dts_outs.append(out)
 
     if transpile_srcs:
         _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs)
@@ -266,14 +277,15 @@ _oxc_transpiler_rule = rule(
             default = False,
             doc = "Emit .d.ts declaration outputs.",
         ),
-        "allow_js": attr.bool(default = False),
-        "rewrite_extensions": attr.bool(
-            default = False,
-            doc = "Rewrite .ts/.mts/.cts import extensions to .js/.mjs/.cjs.",
-        ),
         "source_maps": attr.bool(
             default = False,
             doc = "Emit a .js.map source map file alongside each JS output.",
+        ),
+        "preserve_jsx": attr.bool(
+            default = False,
+            doc = "Keep JSX syntax in the output instead of transforming it to " +
+                  "jsx-runtime calls, like tsc's jsx=preserve. Types are still " +
+                  "stripped, and .tsx/.jsx sources produce .jsx outputs.",
         ),
         "_tool": attr.label(
             executable = True,
@@ -290,22 +302,20 @@ def oxc_transpiler(
         root_dir = "",
         emit_js = True,
         emit_dts = False,
-        allow_js = False,
-        rewrite_extensions = False,
         source_maps = False,
+        preserve_jsx = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
         name = name,
         srcs = srcs,
-        js_outs = _calculate_outs(srcs, _to_js_out, allow_js or False, out_dir or "", root_dir or "") if emit_js else [],
+        js_outs = _calculate_outs(srcs, _to_js_out, preserve_jsx or False, out_dir or "", root_dir or "") if emit_js else [],
         dts_outs = _calculate_outs(srcs, _to_dts_out, out_dir or "", root_dir or "") if emit_dts else [],
         out_dir = out_dir or "",
         root_dir = root_dir or "",
         emit_js = emit_js,
         emit_dts = emit_dts,
-        allow_js = allow_js or False,
-        rewrite_extensions = rewrite_extensions or False,
         source_maps = source_maps or False,
+        preserve_jsx = preserve_jsx or False,
         **kwargs
     )

@@ -1,4 +1,9 @@
 bazel-*
 .bazelrc.user
+
+# Lockfiles are generated for local performance but only the transpiler module,
+# pinned to a single Bazel version, commits and validates its lockfile.
+MODULE.bazel.lock
+!transpiler/MODULE.bazel.lock
 .idea/
 .ijwb/

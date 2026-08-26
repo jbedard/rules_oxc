@@ -30,8 +30,10 @@ jobs:
           - { id: bazel-8, version: 8.6.0 }
           - { id: bazel-9, version: 9.x }
         include:
-          # The transpiler module is internal-only: test it only on its pinned .bazelversion
+          # The transpiler module is internal-only: test it only on its pinned
+          # .bazelversion, which validates its committed MODULE.bazel.lock.
           - workspace: { path: transpiler, slug: transpiler }
+            bazel: { lockfile_mode: error }
     env:
       USE_BAZEL_VERSION: ${{ matrix.bazel.version }}
     steps:
@@ -46,7 +48,7 @@ jobs:
       # Exit code 4 means the build succeeded but the folder has no test targets.
       - name: bazel test //...
         working-directory: ${{ matrix.workspace.path }}
-        run: bazel --bazelrc=$GITHUB_WORKSPACE/.github/workflows/ci.bazelrc test //... || test $? -eq 4
+        run: bazel --bazelrc=$GITHUB_WORKSPACE/.github/workflows/ci.bazelrc test --lockfile_mode=${{ matrix.bazel.lockfile_mode || 'update' }} //... || test $? -eq 4
 
   # For branch protection settings, this job provides a "stable" name that can be used to gate PR merges
   # on "all matrix jobs were successful".

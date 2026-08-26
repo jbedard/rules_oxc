@@ -88,6 +88,15 @@ def _to_dts_out(src, out_dir, root_dir):
     out_ext = _DTS_EXT_MAP.get(src_ext, ".d.ts")
     return _out_path(path[:ext_idx] + out_ext, out_dir, root_dir)
 
+def _to_json_out(src, out_dir, root_dir):
+    """Return the output path for a `.json` source, or None to skip it."""
+    path = src[src.find(":") + 1:]
+
+    if not path.endswith(".json"):
+        return None
+
+    return _out_path(path, out_dir, root_dir)
+
 def _calculate_outs(srcs, to_out, *args):
     outs = []
     for src in srcs:
@@ -157,10 +166,11 @@ def _oxc_transpiler_impl(ctx):
     if root_dir == ".":
         root_dir = ""
 
-    predeclared = {f.short_path: f for f in ctx.outputs.js_outs + ctx.outputs.dts_outs}
+    predeclared = {f.short_path: f for f in ctx.outputs.js_outs + ctx.outputs.dts_outs + ctx.outputs.json_outs}
 
     js_outs = []  # JS files only, for the transpile action
     dts_outs = []  # declaration files only, for JsInfo types
+    json_outs = []  # data files copied through unchanged, alongside JS outputs
     transpile_srcs = []
     transpile_js_outs = []  # aligned with transpile_srcs
     transpile_dts_outs = []  # aligned with transpile_srcs
@@ -169,7 +179,7 @@ def _oxc_transpiler_impl(ctx):
     src_paths = lib.files_relative_to_package(ctx, ctx.files.srcs)
 
     for src, src_path in zip(ctx.files.srcs, src_paths):
-        if _is_declaration(src_path) or src_path.endswith(".json"):
+        if _is_declaration(src_path):
             continue
 
         if root_dir != "" and not src_path.startswith(root_dir + "/"):
@@ -177,6 +187,16 @@ def _oxc_transpiler_impl(ctx):
                 "Files to transpile must be in root_dir: \"{}\".\n".format(ctx.attr.root_dir) +
                 "The file \"{}\" would produce output outside out_dir: \"{}\".\n".format(src_path, ctx.attr.out_dir),
             )
+
+        # JSON has no syntax to transpile: copy it through unchanged, like tsc's
+        # resolveJsonModule emit and swc's equivalent data-src handling.
+        if src_path.endswith(".json"):
+            if ctx.attr.emit_js:
+                out_path = lib.to_out_path(src_path, ctx.attr.out_dir, ctx.attr.root_dir)
+                out = _declare(ctx, predeclared, out_path)
+                ctx.actions.symlink(output = out, target_file = src)
+                json_outs.append(out)
+            continue
 
         ext_idx = src_path.rindex(".")
         src_ext = src_path[ext_idx:]
@@ -216,7 +236,7 @@ def _oxc_transpiler_impl(ctx):
     # DefaultInfo falls back to types when no JS is emitted, declarations are
     # exposed via JsInfo types and the "types" output group, and transitive
     # depsets include JsInfo carried by srcs targets.
-    output_sources = js_outs + map_outs
+    output_sources = js_outs + map_outs + json_outs
     output_types = dts_outs
     default_outputs = output_sources if len(output_sources) else output_types
 
@@ -267,6 +287,7 @@ _oxc_transpiler_rule = rule(
         # rather than source files that may exist on disk.
         "js_outs": attr.output_list(),
         "dts_outs": attr.output_list(),
+        "json_outs": attr.output_list(),
         "out_dir": attr.string(),
         "root_dir": attr.string(),
         "emit_js": attr.bool(
@@ -311,6 +332,7 @@ def oxc_transpiler(
         srcs = srcs,
         js_outs = _calculate_outs(srcs, _to_js_out, preserve_jsx or False, out_dir or "", root_dir or "") if emit_js else [],
         dts_outs = _calculate_outs(srcs, _to_dts_out, out_dir or "", root_dir or "") if emit_dts else [],
+        json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js else [],
         out_dir = out_dir or "",
         root_dir = root_dir or "",
         emit_js = emit_js,

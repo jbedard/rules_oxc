@@ -14,5 +14,5 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
 - `tsc_declarations` - oxc produces JavaScript while tsc emits declarations.
 
 It lives as a separate e2e workspace because `ts_project` requires the
-`@npm_typescript` repository and node toolchain setup that the rules_oxc
+`@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc
 module itself does not need.

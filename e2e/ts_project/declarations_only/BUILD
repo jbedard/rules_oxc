@@ -5,11 +5,11 @@ oxc_transpiler is configured with emit_js = False so its single action emits
 just the .d.ts outputs.
 """
 
+load("@aspect_rules_oxc//oxc:defs.bzl", "oxc_transpiler")
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 load("@bazel_skylib//lib:partial.bzl", "partial")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
-load("@rules_oxc//oxc:defs.bzl", "oxc_transpiler")
 
 package(default_testonly = True)
 

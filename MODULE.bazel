@@ -1,7 +1,7 @@
 "Bazel dependencies"
 
 module(
-    name = "rules_oxc",
+    name = "aspect_rules_oxc",
     version = "0.0.0",
     bazel_compatibility = [">=8.6.0"],
 )

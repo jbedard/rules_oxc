@@ -1,9 +1,9 @@
-bazel_dep(name = "rules_oxc", version = "0.0.0", dev_dependency = True)
+bazel_dep(name = "aspect_rules_oxc", version = "0.0.0", dev_dependency = True)
 bazel_dep(name = "bazel_skylib", version = "1.7.1", dev_dependency = True)
 bazel_dep(name = "aspect_rules_ts", version = "3.9.1", dev_dependency = True)
 
 local_path_override(
-    module_name = "rules_oxc",
+    module_name = "aspect_rules_oxc",
     path = "../..",
 )
 

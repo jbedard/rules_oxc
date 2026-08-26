@@ -1,8 +1,8 @@
-"""Exercises rules_oxc from an end-user's perspective."""
+"""Exercises aspect_rules_oxc from an end-user's perspective."""
 
+load("@aspect_rules_oxc//oxc:defs.bzl", "oxc_transpiler")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
-load("@rules_oxc//oxc:defs.bzl", "oxc_transpiler")
 
 package(default_testonly = True)
 

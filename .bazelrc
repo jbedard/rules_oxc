@@ -12,6 +12,19 @@ build --host_macos_minimum_os=12.0
 # https://bazelbuild.slack.com/archives/C014RARENH0/p1691158021917459?thread_ts=1691156601.420349&cid=C014RARENH0
 common --check_direct_dependencies=off
 
+# Use a locally built transpiler binary instead of the prebuilt release
+# fetched in MODULE.bazel. Build and stage the binary first with
+# tools/local-transpiler.sh, then e.g.:
+#   bazel test //oxc/... --config=local-transpiler
+# All three platform repos point at the same dir; only the exec platform's
+# repo is ever materialized, so a single staged binary is sufficient.
+# The +_repo_rules+ prefix is the canonical name of use_repo_rule repos
+# declared in the root MODULE.bazel; --override_repository does not resolve
+# apparent names for these.
+common:local-transpiler --override_repository=+_repo_rules+transpiler_aarch64_apple_darwin=%workspace%/tools/transpiler-override
+common:local-transpiler --override_repository=+_repo_rules+transpiler_aarch64_unknown_linux_gnu=%workspace%/tools/transpiler-override
+common:local-transpiler --override_repository=+_repo_rules+transpiler_x86_64_unknown_linux_gnu=%workspace%/tools/transpiler-override
+
 # Load any settings specific to the current user.
 # .bazelrc.user should appear in .gitignore so that settings are not shared with team members
 # This needs to be last statement in this

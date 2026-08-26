@@ -1,9 +1,12 @@
 bazel-*
 .bazelrc.user
+.idea/
+.ijwb/
 
 # Lockfiles are generated for local performance but only the transpiler module,
 # pinned to a single Bazel version, commits and validates its lockfile.
 MODULE.bazel.lock
 !transpiler/MODULE.bazel.lock
-.idea/
-.ijwb/
+
+# Prebuilt binaries for local testing of transpiler
+tools/transpiler-override/file/transpiler

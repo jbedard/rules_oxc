@@ -57,6 +57,8 @@ struct Options {
     // set_public_class_fields assumption plus remove_class_fields_without_initializer; true keeps
     // define semantics, tsc's own default for target >= es2022.
     use_define_for_class_fields: bool,
+    // tsc's stripInternal: omit declarations marked /** @internal */ from the .d.ts outputs.
+    strip_internal: bool,
 }
 
 struct Entry {
@@ -119,6 +121,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             jsx_pragma: None,
             jsx_pragma_frag: None,
             use_define_for_class_fields: false,
+            strip_internal: false,
         },
         manifest_path: None,
         positional: Vec::new(),
@@ -161,6 +164,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             }
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
             "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
+            "--strip-internal" => cli.options.strip_internal = true,
             "--target" => {
                 let target = flag_value(&mut args, &arg, "a value")?;
                 cli.options.env = Some(
@@ -492,7 +496,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         let decl_ret = IsolatedDeclarations::new(
             &allocator,
             OxcIsolatedDeclarationsOptions {
-                strip_internal: false,
+                strip_internal: options.strip_internal,
             },
         )
         .build(&parser_ret.program);
@@ -633,6 +637,7 @@ mod tests {
             jsx_pragma: None,
             jsx_pragma_frag: None,
             use_define_for_class_fields: false,
+            strip_internal: false,
         }
     }
 
@@ -997,6 +1002,25 @@ mod tests {
             "dts: {dts}"
         );
         assert!(!dts.contains("return"), "dts: {dts}");
+    }
+
+    // tsc's stripInternal: /** @internal */ declarations are omitted from the dts output.
+    #[test]
+    fn strip_internal_omits_internal_declarations() {
+        let src = "/** @internal */\nexport const secret: number = 1;\nexport const open: number = 2;\n";
+        let kept = transpile("a.ts", src, &default_options());
+        assert!(kept.errors.is_empty(), "errors: {:?}", kept.errors);
+        assert!(kept.dts_code.unwrap().contains("secret"));
+
+        let options = Options {
+            strip_internal: true,
+            ..default_options()
+        };
+        let stripped = transpile("a.ts", src, &options);
+        assert!(stripped.errors.is_empty(), "errors: {:?}", stripped.errors);
+        let dts = stripped.dts_code.unwrap();
+        assert!(!dts.contains("secret"), "dts: {dts}");
+        assert!(dts.contains("open"), "dts: {dts}");
     }
 
     #[test]

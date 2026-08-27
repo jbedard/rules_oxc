@@ -29,6 +29,15 @@ struct Entry {
 }
 
 fn main() {
+    if let Err(errors) = run(std::env::args().skip(1)) {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     let mut options = Options {
         emit_js: false,
         emit_dts: false,
@@ -38,7 +47,7 @@ fn main() {
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
-    let mut args_iter = std::env::args().skip(1);
+    let mut args_iter = args;
 
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -48,18 +57,20 @@ fn main() {
             "--preserve-jsx" => options.preserve_jsx = true,
             "--rewrite-extensions" => options.rewrite_extensions = true,
             "--manifest" => {
-                manifest_path = Some(args_iter.next().unwrap_or_else(|| {
-                    eprintln!("error: --manifest requires a file path");
-                    std::process::exit(1);
-                }));
+                manifest_path = Some(
+                    args_iter
+                        .next()
+                        .ok_or_else(|| vec!["error: --manifest requires a file path".to_string()])?,
+                );
             }
             _ => positional.push(arg),
         }
     }
 
     if !options.emit_js && !options.emit_dts {
-        eprintln!("error: at least one of --emit-js or --emit-dts is required");
-        std::process::exit(1);
+        return Err(vec![
+            "error: at least one of --emit-js or --emit-dts is required".to_string(),
+        ]);
     }
 
     // Each manifest entry is the source path followed by the JS output path
@@ -69,21 +80,18 @@ fn main() {
     let entry_width = 1 + options.emit_js as usize + options.emit_dts as usize;
 
     let lines: Vec<String> = if let Some(path) = manifest_path {
-        let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("error: cannot read manifest {path}: {e}");
-            std::process::exit(1);
-        });
+        let content = fs::read_to_string(&path)
+            .map_err(|e| vec![format!("error: cannot read manifest {path}: {e}")])?;
         content.lines().map(str::to_string).collect()
     } else {
         positional
     };
 
     if !lines.len().is_multiple_of(entry_width) {
-        eprintln!(
+        return Err(vec![format!(
             "error: expected entries of {entry_width} lines (src followed by output paths), got {} lines",
             lines.len()
-        );
-        std::process::exit(1);
+        )]);
     }
 
     let entries: Vec<Entry> = lines
@@ -108,10 +116,8 @@ fn main() {
     let mut outputs: Vec<(String, String, Option<String>)> = Vec::new();
 
     for entry in &entries {
-        let content = fs::read_to_string(&entry.src).unwrap_or_else(|e| {
-            eprintln!("error: cannot read {}: {e}", entry.src);
-            std::process::exit(1);
-        });
+        let content = fs::read_to_string(&entry.src)
+            .map_err(|e| vec![format!("error: cannot read {}: {e}", entry.src)])?;
 
         // Declaration files pass through unchanged and have no JS output.
         if entry.src.ends_with(".d.ts") {
@@ -142,10 +148,7 @@ fn main() {
     }
 
     if !all_errors.is_empty() {
-        for error in &all_errors {
-            eprintln!("{error}");
-        }
-        std::process::exit(1);
+        return Err(all_errors);
     }
 
     for (output_path, code, map) in outputs {
@@ -160,6 +163,8 @@ fn main() {
             fs::write(out, code).unwrap();
         }
     }
+
+    Ok(())
 }
 
 struct TranspileResult {
@@ -650,5 +655,226 @@ mod tests {
         assert_eq!(resolve_specifier(&dir, "./b.jsx", false, true), None);
         assert_eq!(resolve_specifier(&dir, "./b.mjs", false, true), None);
         assert_eq!(resolve_specifier(&dir, "./b.cjs", false, true), None);
+    }
+
+    #[test]
+    fn transpile_resolves_export_all_specifier() {
+        let dir = test_dir("transpile_export_all");
+        fs::write(dir.join("b.ts"), "").unwrap();
+        let options = Options {
+            emit_dts: false,
+            ..default_options()
+        };
+        let src = dir.join("a.ts");
+        let result = transpile(src.to_str().unwrap(), "export * from \"./b\";\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("export * from \"./b.js\""), "js: {js}");
+    }
+
+    #[test]
+    fn transpile_reports_semantic_errors() {
+        let result = transpile("a.ts", "const a = 1;\nconst a = 2;\n", &default_options());
+        assert!(!result.errors.is_empty());
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn transpile_module_variant_sources() {
+        let result = transpile("a.mts", "export const x: number = 1;\n", &default_options());
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("export const x = 1"));
+        assert!(result.dts_code.unwrap().contains("declare const x: number"));
+
+        let result = transpile("a.cts", "export const y: number = 2;\n", &default_options());
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("y = 2"));
+        assert!(result.dts_code.is_some());
+    }
+
+    fn args(list: &[&str]) -> impl Iterator<Item = String> {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn run_requires_emit_flag() {
+        let err = run(args(&[])).unwrap_err();
+        assert_eq!(
+            err,
+            vec!["error: at least one of --emit-js or --emit-dts is required".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_requires_manifest_path() {
+        let err = run(args(&["--emit-js", "--manifest"])).unwrap_err();
+        assert_eq!(err, vec!["error: --manifest requires a file path".to_string()]);
+    }
+
+    #[test]
+    fn run_reports_unreadable_manifest() {
+        let dir = test_dir("run_missing_manifest");
+        let manifest = dir.join("missing.txt");
+        let err = run(args(&["--emit-js", "--manifest", manifest.to_str().unwrap()])).unwrap_err();
+        assert!(err[0].starts_with("error: cannot read manifest"), "{err:?}");
+    }
+
+    #[test]
+    fn run_rejects_misaligned_entries() {
+        let dir = test_dir("run_misaligned");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x = 1;\n").unwrap();
+        // --emit-js and --emit-dts expect 3 lines per entry; give 2.
+        let err = run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            src.to_str().unwrap(),
+            dir.join("a.js").to_str().unwrap(),
+        ]))
+        .unwrap_err();
+        assert!(err[0].contains("expected entries of 3 lines"), "{err:?}");
+    }
+
+    #[test]
+    fn run_transpiles_manifest_entries() {
+        let dir = test_dir("run_manifest");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let js_out = dir.join("out/a.js");
+        let dts_out = dir.join("out/a.d.ts");
+        let manifest = dir.join("manifest.txt");
+        fs::write(
+            &manifest,
+            format!(
+                "{}\n{}\n{}\n",
+                src.display(),
+                js_out.display(),
+                dts_out.display()
+            ),
+        )
+        .unwrap();
+        run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            "--manifest",
+            manifest.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(read(&js_out).contains("export const x = 1"));
+        assert!(read(&dts_out).contains("declare const x: number"));
+    }
+
+    #[test]
+    fn run_transpiles_positional_entries() {
+        let dir = test_dir("run_positional");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let js_out = dir.join("a.out.js");
+        run(args(&[
+            "--emit-js",
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(read(&js_out).contains("export const x = 1"));
+    }
+
+    #[test]
+    fn run_skips_entries_with_empty_output_path() {
+        let dir = test_dir("run_empty_dts");
+        let src = dir.join("a.js");
+        fs::write(&src, "export const x = 1;\n").unwrap();
+        let js_out = dir.join("out/a.js");
+        let manifest = dir.join("manifest.txt");
+        // Plain JS entry: empty declaration output line means no dts emitted.
+        fs::write(
+            &manifest,
+            format!("{}\n{}\n\n", src.display(), js_out.display()),
+        )
+        .unwrap();
+        run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            "--manifest",
+            manifest.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(read(&js_out).contains("export const x = 1"));
+        assert!(!dir.join("out/a.d.ts").exists());
+    }
+
+    #[test]
+    fn run_passes_through_declaration_files() {
+        let dir = test_dir("run_dts_passthrough");
+        let src = dir.join("a.d.ts");
+        let content = "export declare const x: number;\n";
+        fs::write(&src, content).unwrap();
+        let dts_out = dir.join("out/a.d.ts");
+        let manifest = dir.join("manifest.txt");
+        // Declaration entry: empty JS output line, copied to the dts output.
+        fs::write(
+            &manifest,
+            format!("{}\n\n{}\n", src.display(), dts_out.display()),
+        )
+        .unwrap();
+        run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            "--manifest",
+            manifest.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert_eq!(read(&dts_out), content);
+    }
+
+    #[test]
+    fn run_appends_source_mapping_url_and_writes_map() {
+        let dir = test_dir("run_source_maps");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let js_out = dir.join("out/a.js");
+        run(args(&[
+            "--emit-js",
+            "--source-maps",
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let js = read(&js_out);
+        assert!(js.ends_with("//# sourceMappingURL=a.js.map"), "js: {js}");
+        let map = read(&dir.join("out/a.js.map"));
+        assert!(map.contains("a.ts"), "map: {map}");
+    }
+
+    #[test]
+    fn run_aggregates_errors_across_entries() {
+        let dir = test_dir("run_error_aggregation");
+        let bad1 = dir.join("bad1.ts");
+        let bad2 = dir.join("bad2.ts");
+        let good = dir.join("good.ts");
+        fs::write(&bad1, "const = ;").unwrap();
+        fs::write(&bad2, "const = ;").unwrap();
+        fs::write(&good, "export const x = 1;\n").unwrap();
+        let good_out = dir.join("out/good.js");
+        let err = run(args(&[
+            "--emit-js",
+            bad1.to_str().unwrap(),
+            dir.join("out/bad1.js").to_str().unwrap(),
+            bad2.to_str().unwrap(),
+            dir.join("out/bad2.js").to_str().unwrap(),
+            good.to_str().unwrap(),
+            good_out.to_str().unwrap(),
+        ]))
+        .unwrap_err();
+        // Both failing entries are reported, and no outputs are written.
+        assert!(err.len() >= 2, "errors: {err:?}");
+        assert!(!good_out.exists());
     }
 }

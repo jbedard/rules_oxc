@@ -14,3 +14,16 @@ bazel_dep(name = "aspect_rules_oxc", version = "0.0.0")
 
 To use a commit rather than a release, use `archive_override` or `git_override` in
 your `MODULE.bazel`.
+
+## Limitations
+
+### No `jsx=preserve` equivalent
+
+JSX is always transformed. Preserved JSX can never run under Node, and a
+JSX-aware bundler consumes the `.tsx` sources directly, so a preserve mode has
+no coherent consumer here.
+
+### Extension rewriting scope
+
+Extension rewriting applies to any specifier containing a slash, including
+bare package paths like `"pkg/util.ts"`, where tsc only rewrites relative ones.

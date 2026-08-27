@@ -126,31 +126,6 @@ diff_test(
     file2 = "snapshots/widget.js",
 )
 
-# Same JSX sources with preserve_jsx: JSX left untouched, .jsx outputs.
-oxc_transpiler(
-    name = "transpile_preserve_jsx",
-    srcs = [
-        "src/component.tsx",
-        "src/widget.jsx",
-    ],
-    emit_dts = True,
-    out_dir = "preserve",
-    preserve_jsx = True,
-    root_dir = "src",
-)
-
-diff_test(
-    name = "preserve_jsx_component_test",
-    file1 = "preserve/component.jsx",
-    file2 = "snapshots/component.jsx",
-)
-
-diff_test(
-    name = "preserve_jsx_widget_test",
-    file1 = "preserve/widget.jsx",
-    file2 = "snapshots/widget.jsx",
-)
-
 diff_test(
     name = "js_main_test",
     file1 = "dist/main.js",
@@ -213,23 +188,6 @@ diff_test(
     name = "rewrite_extensions_on_test",
     file1 = "rewrite_on/rewrite_extensions/main.js",
     file2 = "snapshots/main_extensions_on.js",
-)
-
-# rewrite_extensions combined with preserve_jsx: ".tsx" specifiers are
-# rewritten to the ".jsx" extension that preserve_jsx outputs use.
-oxc_transpiler(
-    name = "transpile_rewrite_extensions_preserve_jsx",
-    srcs = _REWRITE_EXTENSIONS_SRCS,
-    out_dir = "rewrite_preserve",
-    preserve_jsx = True,
-    rewrite_extensions = True,
-    root_dir = "src",
-)
-
-diff_test(
-    name = "rewrite_extensions_preserve_jsx_test",
-    file1 = "rewrite_preserve/rewrite_extensions/main.js",
-    file2 = "snapshots/main_extensions_preserve_jsx.js",
 )
 
 # source_maps: each JS output gains a sourceMappingURL comment and a sibling
@@ -297,20 +255,6 @@ diff_test(
     name = "js_widget_in_place_test",
     file1 = "src/widget.js",
     file2 = "snapshots/widget.js",
-)
-
-# preserve_jsx in place: .tsx emits .jsx, so outputs don't collide with
-# inputs. .jsx sources would collide (output ext is also .jsx).
-oxc_transpiler(
-    name = "transpile_preserve_jsx_in_place",
-    srcs = ["src/component.tsx"],
-    preserve_jsx = True,
-)
-
-diff_test(
-    name = "preserve_jsx_in_place_test",
-    file1 = "src/component.jsx",
-    file2 = "snapshots/component.jsx",
 )
 
 # root_dir without out_dir: outputs land at the package root.

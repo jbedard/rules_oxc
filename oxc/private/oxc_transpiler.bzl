@@ -6,22 +6,15 @@ load("@aspect_rules_js//js:providers.bzl", "JsInfo")
 load("@aspect_rules_ts//ts/private:ts_lib.bzl", "lib")
 
 # Output extension for each input extension.
-# .ts/.tsx/.jsx default to .js: JSX is transformed (automatic runtime), so
-# like tsc's jsx=react-jsx the output is plain JS. Explicit entries cover the
-# module-type variants and .js, which keep their own name.
+# .ts/.tsx/.jsx default to .js: JSX is always transformed, so the output is
+# plain JS. Explicit entries cover the module-type variants and .js, which
+# keep their own name.
 _JS_EXT_MAP = {
     ".cts": ".cjs",
     ".cjs": ".cjs",
     ".mts": ".mjs",
     ".mjs": ".mjs",
     ".js": ".js",
-}
-
-# With preserve_jsx (tsc's jsx=preserve) the output still contains JSX
-# syntax, so the JS output of .tsx/.jsx keeps the .jsx extension.
-_JS_EXT_MAP_PRESERVE_JSX = _JS_EXT_MAP | {
-    ".tsx": ".jsx",
-    ".jsx": ".jsx",
 }
 
 _DTS_EXT_MAP = {
@@ -51,7 +44,7 @@ def _out_path(src, out_dir, root_dir):
         src = out_dir + "/" + src
     return src
 
-def _to_js_out(src, preserve_jsx, out_dir, root_dir):
+def _to_js_out(src, out_dir, root_dir):
     """Return the JS output path for a source path, or None to skip it."""
     path = src[src.find(":") + 1:]
 
@@ -61,8 +54,7 @@ def _to_js_out(src, preserve_jsx, out_dir, root_dir):
     ext_idx = path.rindex(".")
     src_ext = path[ext_idx:]
 
-    ext_map = _JS_EXT_MAP_PRESERVE_JSX if preserve_jsx else _JS_EXT_MAP
-    out_ext = ext_map.get(src_ext, ".js")
+    out_ext = _JS_EXT_MAP.get(src_ext, ".js")
     out = _out_path(path[:ext_idx] + out_ext, out_dir, root_dir)
     if out == path:
         fail(
@@ -146,8 +138,6 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
         args.add("--emit-js")
         if ctx.attr.source_maps:
             args.add("--source-maps")
-        if ctx.attr.preserve_jsx:
-            args.add("--preserve-jsx")
         if ctx.attr.rewrite_extensions:
             args.add("--rewrite-extensions")
     if emit_dts:
@@ -218,8 +208,7 @@ def _oxc_transpiler_impl(ctx):
         transpile_srcs.append(src)
 
         if ctx.attr.emit_js:
-            ext_map = _JS_EXT_MAP_PRESERVE_JSX if ctx.attr.preserve_jsx else _JS_EXT_MAP
-            out_path = src_path[:ext_idx] + ext_map.get(src_ext, ".js")
+            out_path = src_path[:ext_idx] + _JS_EXT_MAP.get(src_ext, ".js")
             out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
             out = _declare(ctx, predeclared, out_path)
             js_outs.append(out)
@@ -311,19 +300,15 @@ _oxc_transpiler_rule = rule(
             default = False,
             doc = "Emit a .js.map source map file alongside each JS output.",
         ),
-        "preserve_jsx": attr.bool(
-            default = False,
-            doc = "Keep JSX syntax in the output instead of transforming it to " +
-                  "jsx-runtime calls, like tsc's jsx=preserve. Types are still " +
-                  "stripped, and .tsx/.jsx sources produce .jsx outputs.",
-        ),
         "rewrite_extensions": attr.bool(
             default = False,
-            doc = "Rewrite relative import/export specifiers that already end in " +
-                  "'.ts', '.tsx', '.mts', or '.cts' to their emitted JS extension, " +
-                  "like tsc's rewriteRelativeImportExtensions and swc's " +
-                  "jsc.rewriteRelativeImportExtensions. Specifiers with other " +
-                  "extensions (e.g. '.js') are left untouched.",
+            doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
+                  "'.mts', or '.cts' to their emitted JS extension, using oxc's " +
+                  "rewrite_import_extensions transform. Unlike tsc's " +
+                  "rewriteRelativeImportExtensions, any slash-containing specifier " +
+                  "is rewritten (including bare package paths; see README " +
+                  "limitations). Specifiers with other extensions (e.g. '.js') " +
+                  "are left untouched.",
         ),
         "_tool": attr.label(
             executable = True,
@@ -341,14 +326,13 @@ def oxc_transpiler(
         emit_js = True,
         emit_dts = False,
         source_maps = False,
-        preserve_jsx = False,
         rewrite_extensions = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
         name = name,
         srcs = srcs,
-        js_outs = _calculate_outs(srcs, _to_js_out, preserve_jsx or False, out_dir or "", root_dir or "") if emit_js else [],
+        js_outs = _calculate_outs(srcs, _to_js_out, out_dir or "", root_dir or "") if emit_js else [],
         dts_outs = _calculate_outs(srcs, _to_dts_out, out_dir or "", root_dir or "") if emit_dts else [],
         json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js else [],
         out_dir = out_dir or "",
@@ -356,7 +340,6 @@ def oxc_transpiler(
         emit_js = emit_js,
         emit_dts = emit_dts,
         source_maps = source_maps or False,
-        preserve_jsx = preserve_jsx or False,
         rewrite_extensions = rewrite_extensions or False,
         **kwargs
     )

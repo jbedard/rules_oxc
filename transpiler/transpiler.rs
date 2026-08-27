@@ -1,5 +1,6 @@
 use oxc::allocator::Allocator;
-use oxc::ast::ast::{Program, Statement};
+use oxc::ast::ast::{Expression, ImportExpression, Program, Statement, StringLiteral};
+use oxc::ast_visit::{VisitMut, walk_mut};
 use oxc::codegen::{Codegen, CodegenOptions};
 use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource};
 use oxc::isolated_declarations::{
@@ -271,6 +272,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             &mut parser_ret.program,
             &allocator,
             Path::new(filename),
+            !parser_ret.module_record.dynamic_imports.is_empty(),
             options.preserve_jsx,
             options.rewrite_extensions,
         );
@@ -307,10 +309,18 @@ fn resolve_relative_specifiers<'a>(
     program: &mut Program<'a>,
     allocator: &'a Allocator,
     filename: &Path,
+    has_dynamic_imports: bool,
     preserve_jsx: bool,
     rewrite_extensions: bool,
 ) {
     let base_dir = filename.parent().unwrap_or_else(|| Path::new(""));
+
+    let mut rewriter = SpecifierRewriter {
+        allocator,
+        base_dir,
+        preserve_jsx,
+        rewrite_extensions,
+    };
 
     for stmt in program.body.iter_mut() {
         let source = match stmt {
@@ -320,19 +330,51 @@ fn resolve_relative_specifiers<'a>(
             _ => None,
         };
 
-        let Some(source) = source else {
-            continue;
-        };
+        if let Some(source) = source {
+            rewriter.rewrite(source);
+        }
+    }
 
+    // Dynamic import("./x.ts") specifiers can appear in any expression
+    // position and need a full program walk to find. Only the extension
+    // rewrite applies to them (extensionless dynamic imports are left
+    // untouched), so the walk is skipped entirely unless rewrite_extensions
+    // is on and the parser recorded dynamic imports.
+    if rewrite_extensions && has_dynamic_imports {
+        rewriter.visit_program(program);
+    }
+}
+
+struct SpecifierRewriter<'a, 'b> {
+    allocator: &'a Allocator,
+    base_dir: &'b Path,
+    preserve_jsx: bool,
+    rewrite_extensions: bool,
+}
+
+impl<'a> SpecifierRewriter<'a, '_> {
+    fn rewrite(&mut self, source: &mut StringLiteral<'a>) {
         if let Some(resolved) = resolve_specifier(
-            base_dir,
+            self.base_dir,
             source.value.as_str(),
-            preserve_jsx,
-            rewrite_extensions,
+            self.preserve_jsx,
+            self.rewrite_extensions,
         ) {
-            source.value = allocator.alloc_str(&resolved).into();
+            source.value = self.allocator.alloc_str(&resolved).into();
             source.raw = None;
         }
+    }
+}
+
+impl<'a> VisitMut<'a> for SpecifierRewriter<'a, '_> {
+    fn visit_import_expression(&mut self, expr: &mut ImportExpression<'a>) {
+        if let Expression::StringLiteral(lit) = &mut expr.source
+            && let Some(rewritten) = rewrite_ts_extension(lit.value.as_str(), self.preserve_jsx)
+        {
+            lit.value = self.allocator.alloc_str(&rewritten).into();
+            lit.raw = None;
+        }
+        walk_mut::walk_import_expression(self, expr);
     }
 }
 
@@ -354,6 +396,20 @@ fn js_ext_for(src_ext: &str, preserve_jsx: bool) -> &'static str {
 // already valid runtime specifiers and are left untouched, matching tsc.
 const REWRITABLE_TS_EXTS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
 
+// Rewrite a relative specifier with a TypeScript extension (e.g. "./foo.ts")
+// to its emitted JS extension. Returns None for anything else.
+fn rewrite_ts_extension(specifier: &str, preserve_jsx: bool) -> Option<String> {
+    if !specifier.starts_with("./") && !specifier.starts_with("../") {
+        return None;
+    }
+    let ext = Path::new(specifier).extension()?.to_str()?;
+    if !REWRITABLE_TS_EXTS.contains(&ext) {
+        return None;
+    }
+    let stem = specifier.strip_suffix(&format!(".{ext}"))?;
+    Some(format!("{stem}.{}", js_ext_for(ext, preserve_jsx)))
+}
+
 fn resolve_specifier(
     base_dir: &Path,
     specifier: &str,
@@ -364,12 +420,11 @@ fn resolve_specifier(
         return None;
     }
 
-    if let Some(ext) = Path::new(specifier).extension().and_then(|e| e.to_str()) {
-        if rewrite_extensions && REWRITABLE_TS_EXTS.contains(&ext) {
-            let stem = specifier.strip_suffix(&format!(".{ext}"))?;
-            return Some(format!("{stem}.{}", js_ext_for(ext, preserve_jsx)));
+    if Path::new(specifier).extension().is_some() {
+        if rewrite_extensions {
+            return rewrite_ts_extension(specifier, preserve_jsx);
         }
-        // Already has a non-rewritable extension (or rewriting is disabled): leave as-is.
+        // Already has an extension and rewriting is disabled: leave as-is.
         return None;
     }
 
@@ -670,6 +725,80 @@ mod tests {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let js = result.js_code.unwrap();
         assert!(js.contains("export * from \"./b.js\""), "js: {js}");
+    }
+
+    #[test]
+    fn transpile_rewrites_dynamic_import_extension() {
+        let dir = test_dir("transpile_dynamic_import_rewrite");
+        let options = Options {
+            emit_dts: false,
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let src = dir.join("a.ts");
+        let result = transpile(
+            src.to_str().unwrap(),
+            "export const p = import(\"./b.ts\");\nexport async function f() { return await import(\"./c.mts\"); }\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("import(\"./b.js\")"), "js: {js}");
+        assert!(js.contains("import(\"./c.mjs\")"), "js: {js}");
+    }
+
+    // Dynamic imports only get the extension rewrite: extensionless
+    // specifiers are not resolved against files on disk, unlike static
+    // imports.
+    #[test]
+    fn transpile_leaves_extensionless_dynamic_import() {
+        let dir = test_dir("transpile_dynamic_import_extensionless");
+        fs::write(dir.join("b.ts"), "").unwrap();
+        for rewrite_extensions in [false, true] {
+            let options = Options {
+                emit_dts: false,
+                rewrite_extensions,
+                ..default_options()
+            };
+            let src = dir.join("a.ts");
+            let result = transpile(
+                src.to_str().unwrap(),
+                "export const p = import(\"./b\");\n",
+                &options,
+            );
+            assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+            let js = result.js_code.unwrap();
+            assert!(js.contains("import(\"./b\")"), "js: {js}");
+        }
+    }
+
+    #[test]
+    fn transpile_leaves_non_literal_dynamic_import() {
+        let dir = test_dir("transpile_dynamic_import_non_literal");
+        let options = Options {
+            emit_dts: false,
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let src = dir.join("a.ts");
+        let result = transpile(
+            src.to_str().unwrap(),
+            "export function f(name: string) { return import(name); }\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("import(name)"), "js: {js}");
+    }
+
+    #[test]
+    fn rewrite_ts_extension_only_rewrites_relative_ts_specifiers() {
+        assert_eq!(rewrite_ts_extension("./b.ts", false), Some("./b.js".to_string()));
+        assert_eq!(rewrite_ts_extension("../b.cts", false), Some("../b.cjs".to_string()));
+        assert_eq!(rewrite_ts_extension("./b.tsx", true), Some("./b.jsx".to_string()));
+        assert_eq!(rewrite_ts_extension("./b.js", false), None);
+        assert_eq!(rewrite_ts_extension("./b", false), None);
+        assert_eq!(rewrite_ts_extension("lodash", false), None);
     }
 
     #[test]

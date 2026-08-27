@@ -9,6 +9,7 @@ path = "dummy.rs" # We just need this for Cargo to generate the Cargo.lock
 
 [dependencies]
 oxc = { version = "0.147.0", features = [
+  "ast_visit",
   "codegen",
   "isolated_declarations",
   "semantic",

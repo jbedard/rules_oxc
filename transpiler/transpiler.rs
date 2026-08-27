@@ -10,17 +10,27 @@ use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
 use oxc::transformer::{
-    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, TransformOptions,
-    Transformer, TypeScriptOptions,
+    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime,
+    TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
+
+// JSX handling, using oxc's terminology: the "automatic" and "classic" runtimes of the JSX
+// transform (tsc's jsx=react-jsx and jsx=react), or "preserve" to leave JSX syntax untouched
+// (tsc's jsx=preserve).
+#[derive(Clone, Copy, PartialEq)]
+enum JsxMode {
+    Automatic,
+    Classic,
+    Preserve,
+}
 
 struct Options {
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
-    preserve_jsx: bool,
+    jsx: JsxMode,
     rewrite_extensions: bool,
     // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's
     // `target`. None leaves syntax at the latest ES version.
@@ -50,7 +60,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         emit_js: false,
         emit_dts: false,
         source_maps: false,
-        preserve_jsx: false,
+        jsx: JsxMode::Automatic,
         rewrite_extensions: false,
         env: None,
         helpers_module: None,
@@ -64,7 +74,23 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             "--emit-js" => options.emit_js = true,
             "--emit-dts" => options.emit_dts = true,
             "--source-maps" => options.source_maps = true,
-            "--preserve-jsx" => options.preserve_jsx = true,
+            "--jsx" => {
+                let value = args_iter
+                    .next()
+                    .ok_or_else(|| vec!["error: --jsx requires a value".to_string()])?;
+                options.jsx = match value.as_str() {
+                    "automatic" => JsxMode::Automatic,
+                    "classic" => JsxMode::Classic,
+                    "preserve" => JsxMode::Preserve,
+                    _ => {
+                        return Err(vec![format!(
+                            "error: unsupported --jsx \"{value}\": expected \"automatic\", \"classic\", or \"preserve\""
+                        )]);
+                    }
+                };
+            }
+            // Deprecated alias for --jsx preserve, kept until the Bazel rule passes --jsx.
+            "--preserve-jsx" => options.jsx = JsxMode::Preserve,
             "--rewrite-extensions" => options.rewrite_extensions = true,
             "--target" => {
                 let target = args_iter
@@ -157,7 +183,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             emit_js: entry.js_out.is_some(),
             emit_dts: entry.dts_out.is_some(),
             source_maps: options.source_maps,
-            preserve_jsx: options.preserve_jsx,
+            jsx: options.jsx,
             rewrite_extensions: options.rewrite_extensions,
             env: options.env.clone(),
             helpers_module: options.helpers_module.clone(),
@@ -214,11 +240,14 @@ fn transform_options(options: &Options) -> TransformOptions {
             remove_class_fields_without_initializer: true,
             ..Default::default()
         },
-        // Like tsc's jsx=preserve: strip types but leave JSX untouched.
-        jsx: if options.preserve_jsx {
-            JsxOptions::disable()
-        } else {
-            JsxOptions::default()
+        jsx: match options.jsx {
+            JsxMode::Automatic => JsxOptions::default(),
+            JsxMode::Classic => JsxOptions {
+                runtime: JsxRuntime::Classic,
+                ..JsxOptions::default()
+            },
+            // Like tsc's jsx=preserve: strip types but leave JSX untouched.
+            JsxMode::Preserve => JsxOptions::disable(),
         },
         env: options.env.clone().unwrap_or_default(),
         // Helpers are imported like tsc's importHelpers (oxc's only implemented mode);
@@ -314,7 +343,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             &allocator,
             Path::new(filename),
             !parser_ret.module_record.dynamic_imports.is_empty(),
-            options.preserve_jsx,
+            options.jsx == JsxMode::Preserve,
             options.rewrite_extensions,
         );
 
@@ -498,7 +527,7 @@ mod tests {
             emit_js: true,
             emit_dts: true,
             source_maps: false,
-            preserve_jsx: false,
+            jsx: JsxMode::Automatic,
             rewrite_extensions: false,
             env: None,
             helpers_module: None,
@@ -761,10 +790,10 @@ mod tests {
     }
 
     #[test]
-    fn preserve_jsx_keeps_jsx_syntax() {
+    fn jsx_preserve_keeps_jsx_syntax() {
         let options = Options {
             emit_dts: false,
-            preserve_jsx: true,
+            jsx: JsxMode::Preserve,
             ..default_options()
         };
         let result = transpile(
@@ -778,6 +807,57 @@ mod tests {
         assert!(!js.contains("_jsx("), "js: {js}");
         assert!(!js.contains("react/jsx-runtime"), "js: {js}");
         assert!(!js.contains(": object"), "js: {js}");
+    }
+
+    // The classic runtime compiles JSX to React.createElement calls and imports nothing;
+    // providing React is the caller's concern, as with tsc's jsx=react.
+    #[test]
+    fn jsx_classic_uses_create_element() {
+        let options = Options {
+            emit_dts: false,
+            jsx: JsxMode::Classic,
+            ..default_options()
+        };
+        let result = transpile(
+            "a.tsx",
+            "export const el: object = <div id={1} />;\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("React.createElement"), "js: {js}");
+        assert!(!js.contains("react/jsx-runtime"), "js: {js}");
+        assert!(!js.contains("<div"), "js: {js}");
+    }
+
+    #[test]
+    fn run_requires_jsx_value() {
+        let err = run(args(&["--emit-js", "--jsx"])).unwrap_err();
+        assert_eq!(err, vec!["error: --jsx requires a value".to_string()]);
+    }
+
+    #[test]
+    fn run_rejects_unsupported_jsx() {
+        let err = run(args(&["--emit-js", "--jsx", "react-jsx"])).unwrap_err();
+        assert!(err[0].contains("unsupported --jsx \"react-jsx\""), "{err:?}");
+    }
+
+    // The deprecated --preserve-jsx alias still selects preserve, so a Bazel rule that has not
+    // switched to --jsx keeps its behavior instead of the flag being silently ignored.
+    #[test]
+    fn run_accepts_deprecated_preserve_jsx() {
+        let dir = test_dir("run_preserve_jsx_alias");
+        let src = dir.join("a.tsx");
+        fs::write(&src, "export const el = <div />;\n").unwrap();
+        let js_out = dir.join("out/a.jsx");
+        run(args(&[
+            "--emit-js",
+            "--preserve-jsx",
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(read(&js_out).contains("<div />"));
     }
 
     fn test_dir(name: &str) -> PathBuf {

@@ -114,6 +114,22 @@ diff_test(
     file2 = "snapshots/component.js",
 )
 
+# jsx = "classic": JSX compiles to React.createElement calls instead of the automatic
+# jsx-runtime import.
+oxc_transpiler(
+    name = "transpile_jsx_classic",
+    srcs = ["src/component.tsx"],
+    jsx = "classic",
+    out_dir = "classicjsx",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "jsx_classic_test",
+    file1 = "classicjsx/component.js",
+    file2 = "snapshots/component_classic.js",
+)
+
 diff_test(
     name = "dts_component_test",
     file1 = "dist/component.d.ts",

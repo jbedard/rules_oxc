@@ -138,6 +138,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
         args.add("--emit-js")
         if ctx.attr.source_maps:
             args.add("--source-maps")
+        if ctx.attr.jsx:
+            args.add("--jsx", ctx.attr.jsx)
         if ctx.attr.rewrite_extensions:
             args.add("--rewrite-extensions")
         if ctx.attr.target:
@@ -348,6 +350,14 @@ _oxc_transpiler_rule = rule(
                   "dependency whenever a transform emits helper imports (none " +
                   "do in the default configuration).",
         ),
+        "jsx": attr.string(
+            doc = "JSX runtime, using oxc's values. \"automatic\" (default) is " +
+                  "the automatic jsx-runtime transform, tsc's jsx=react-jsx. " +
+                  "\"classic\" compiles JSX to React.createElement calls, tsc's " +
+                  "jsx=react; providing React is the caller's concern. Map " +
+                  "tsc's jsx value spellings to oxc's manually.",
+            values = ["", "automatic", "classic"],
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -378,6 +388,7 @@ def oxc_transpiler(
         rewrite_extensions = False,
         target = "",
         helpers_module = "",
+        jsx = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -392,6 +403,7 @@ def oxc_transpiler(
         emit_js = emit_js,
         emit_dts = emit_dts,
         source_maps = source_maps or False,
+        jsx = jsx or "",
         rewrite_extensions = rewrite_extensions or False,
         target = target or "",
         helpers_module = helpers_module or "",

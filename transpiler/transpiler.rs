@@ -64,6 +64,28 @@ struct Options {
     only_remove_type_imports: bool,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            emit_js: false,
+            emit_dts: false,
+            source_maps: false,
+            jsx: JsxRuntime::Automatic,
+            rewrite_extensions: false,
+            env: None,
+            helpers_module: None,
+            module: Module::Preserve,
+            root_dirs: Vec::new(),
+            jsx_import_source: None,
+            jsx_pragma: None,
+            jsx_pragma_frag: None,
+            use_define_for_class_fields: false,
+            strip_internal: false,
+            only_remove_type_imports: false,
+        }
+    }
+}
+
 struct Entry {
     src: String,
     js_out: Option<String>,
@@ -98,8 +120,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     let Cli { options, manifest_path, positional } = parse_args(args)?;
     let entries = read_entries(&options, manifest_path, positional)?;
     let outputs = transpile_entries(&options, &entries)?;
-    write_outputs(outputs);
-    Ok(())
+    write_outputs(outputs)
 }
 
 struct Cli {
@@ -110,23 +131,7 @@ struct Cli {
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>> {
     let mut cli = Cli {
-        options: Options {
-            emit_js: false,
-            emit_dts: false,
-            source_maps: false,
-            jsx: JsxRuntime::Automatic,
-            rewrite_extensions: false,
-            env: None,
-            helpers_module: None,
-            module: Module::Preserve,
-            root_dirs: Vec::new(),
-            jsx_import_source: None,
-            jsx_pragma: None,
-            jsx_pragma_frag: None,
-            use_define_for_class_fields: false,
-            strip_internal: false,
-            only_remove_type_imports: false,
-        },
+        options: Options::default(),
         manifest_path: None,
         positional: Vec::new(),
     };
@@ -149,22 +154,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 };
             }
             "--jsx-import-source" => {
-                cli.options.jsx_import_source = Some(
-                    args.next()
-                        .ok_or_else(|| vec!["error: --jsx-import-source requires a value".to_string()])?,
-                );
+                cli.options.jsx_import_source = Some(flag_value(&mut args, &arg, "a value")?);
             }
             "--jsx-pragma" => {
-                cli.options.jsx_pragma = Some(
-                    args.next()
-                        .ok_or_else(|| vec!["error: --jsx-pragma requires a value".to_string()])?,
-                );
+                cli.options.jsx_pragma = Some(flag_value(&mut args, &arg, "a value")?);
             }
             "--jsx-pragma-frag" => {
-                cli.options.jsx_pragma_frag = Some(
-                    args.next()
-                        .ok_or_else(|| vec!["error: --jsx-pragma-frag requires a value".to_string()])?,
-                );
+                cli.options.jsx_pragma_frag = Some(flag_value(&mut args, &arg, "a value")?);
             }
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
             "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
@@ -319,19 +315,31 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>
     Ok(outputs)
 }
 
-fn write_outputs(outputs: Vec<Output>) {
-    for output in outputs {
-        let out = Path::new(&output.path);
-        fs::create_dir_all(out.parent().unwrap()).unwrap();
-        if let Some(map) = output.map {
-            let map_basename = out.file_name().unwrap().to_string_lossy();
-            let code = format!("{}\n//# sourceMappingURL={map_basename}.map", output.code);
-            fs::write(out, code).unwrap();
-            fs::write(format!("{}.map", output.path), map).unwrap();
-        } else {
-            fs::write(out, output.code).unwrap();
+fn write_outputs(outputs: Vec<Output>) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    for output in &outputs {
+        if let Err(e) = write_output(output) {
+            errors.push(format!("error: cannot write {}: {e}", output.path));
         }
     }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+fn write_output(output: &Output) -> std::io::Result<()> {
+    let out = Path::new(&output.path);
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(map) = &output.map {
+        let name = out.file_name().ok_or_else(|| std::io::Error::other("path has no file name"))?;
+        let map_basename = name.to_string_lossy();
+        let code = format!("{}\n//# sourceMappingURL={map_basename}.map", output.code);
+        fs::write(out, code)?;
+        fs::write(format!("{}.map", output.path), map)?;
+    } else {
+        fs::write(out, &output.code)?;
+    }
+    Ok(())
 }
 
 // Matches the Bazel rule's _is_declaration: all three declaration extensions, so a .d.mts/.d.cts
@@ -475,7 +483,8 @@ fn render_errors(
     diagnostics: impl IntoIterator<Item = OxcDiagnostic>,
 ) -> Vec<String> {
     let handler = GraphicalReportHandler::new().with_theme(GraphicalTheme::none());
-    let source = NamedSource::new(filename, source_text.to_string());
+    // Arc-shared so each diagnostic does not clone the whole source text.
+    let source = std::sync::Arc::new(NamedSource::new(filename, source_text.to_string()));
     diagnostics
         .into_iter()
         .map(|diagnostic| {
@@ -636,23 +645,7 @@ mod tests {
     }
 
     fn default_options() -> Options {
-        Options {
-            emit_js: true,
-            emit_dts: true,
-            source_maps: false,
-            jsx: JsxRuntime::Automatic,
-            rewrite_extensions: false,
-            env: None,
-            helpers_module: None,
-            module: Module::Preserve,
-            root_dirs: Vec::new(),
-            jsx_import_source: None,
-            jsx_pragma: None,
-            jsx_pragma_frag: None,
-            use_define_for_class_fields: false,
-            strip_internal: false,
-            only_remove_type_imports: false,
-        }
+        Options { emit_js: true, emit_dts: true, ..Options::default() }
     }
 
     fn js_options() -> Options {
@@ -1555,6 +1548,21 @@ mod tests {
         // Both failing entries are reported, and no outputs are written.
         assert!(err.len() >= 2, "errors: {err:?}");
         assert!(!good_out.exists());
+    }
+
+    // A write failure is reported as an error like any other, not a panic.
+    #[test]
+    fn run_reports_unwritable_output() {
+        let dir = test_dir("run_unwritable_output");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        // A plain file where the output's parent directory should be.
+        let blocker = dir.join("blocker");
+        fs::write(&blocker, "").unwrap();
+        let out = blocker.join("a.js");
+        let err =
+            run(args(&["--emit-js", src.to_str().unwrap(), out.to_str().unwrap()])).unwrap_err();
+        assert!(err[0].starts_with("error: cannot write"), "{err:?}");
     }
 
     // An unreadable source is reported alongside other entries' errors instead of aborting the pass.

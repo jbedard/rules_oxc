@@ -203,7 +203,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             .map_err(|e| vec![format!("error: cannot read {}: {e}", entry.src)])?;
 
         // Declaration files pass through unchanged and have no JS output.
-        if entry.src.ends_with(".d.ts") {
+        if is_declaration_file(&entry.src) {
             if let Some(dts_out) = &entry.dts_out {
                 outputs.push((dts_out.clone(), content, None));
             }
@@ -252,6 +252,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     }
 
     Ok(())
+}
+
+// Matches the Bazel rule's _is_declaration: all three declaration extensions, so a .d.mts/.d.cts
+// input passes through instead of hitting the transpile path (isolated declarations would error
+// on a declaration file).
+fn is_declaration_file(path: &str) -> bool {
+    path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
 struct TranspileResult {
@@ -1699,6 +1706,32 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(read(&dts_out), content);
+    }
+
+    // .d.mts/.d.cts pass through like .d.ts instead of hitting the transpile path.
+    #[test]
+    fn run_passes_through_module_variant_declaration_files() {
+        let dir = test_dir("run_dmts_passthrough");
+        for (name, out_name) in [("a.d.mts", "out/a.d.mts"), ("b.d.cts", "out/b.d.cts")] {
+            let src = dir.join(name);
+            let content = "export declare const x: number;\n";
+            fs::write(&src, content).unwrap();
+            let dts_out = dir.join(out_name);
+            let manifest = dir.join("manifest.txt");
+            fs::write(
+                &manifest,
+                format!("{}\n\n{}\n", src.display(), dts_out.display()),
+            )
+            .unwrap();
+            run(args(&[
+                "--emit-js",
+                "--emit-dts",
+                "--manifest",
+                manifest.to_str().unwrap(),
+            ]))
+            .unwrap();
+            assert_eq!(read(&dts_out), content);
+        }
     }
 
     #[test]

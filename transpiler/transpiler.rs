@@ -19,9 +19,9 @@ use oxc::transformer::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// JSX handling, using oxc's terminology: the "automatic" and "classic" runtimes of the JSX
-// transform (tsc's jsx=react-jsx and jsx=react). There is no jsx=preserve equivalent: preserved
-// JSX can never run under Node, and a JSX-aware bundler consumes the .tsx sources directly.
+// JSX handling, using oxc's terminology: the "automatic" and "classic" runtimes of the JSX transform
+// (tsc's jsx=react-jsx and jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under
+// Node, and a JSX-aware bundler consumes the .tsx sources directly.
 #[derive(Clone, Copy, PartialEq)]
 enum JsxMode {
     Automatic,
@@ -34,8 +34,7 @@ struct Options {
     source_maps: bool,
     jsx: JsxMode,
     rewrite_extensions: bool,
-    // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's
-    // `target`. None leaves syntax at the latest ES version.
+    // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's `target`; None keeps the latest syntax.
     env: Option<EnvOptions>,
     // Module to import runtime helpers from, defaulting to @oxc-project/runtime. Helpers are
     // always imported (like tsc's importHelpers): oxc has no inline helper mode.
@@ -156,10 +155,9 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         ]);
     }
 
-    // Each manifest entry is the source path followed by the JS output path
-    // (when --emit-js) and the declaration output path (when --emit-dts).
-    // An empty output path means that output is skipped for the entry
-    // (e.g. no declarations for plain JS sources).
+    // Each manifest entry is the source path followed by the JS output path (when --emit-js) and
+    // the declaration output path (when --emit-dts). An empty output path skips that output for
+    // the entry (e.g. no declarations for plain JS sources).
     let entry_width = 1 + options.emit_js as usize + options.emit_dts as usize;
 
     let lines: Vec<String> = if let Some(path) = manifest_path {
@@ -270,8 +268,9 @@ struct TranspileResult {
 
 fn transform_options(options: &Options) -> TransformOptions {
     TransformOptions {
-        // Match the SWC useDefineForClassFields=false behaviour:
-        // class fields without initializers are removed rather than set to undefined.
+        // With remove_class_fields_without_initializer below, matches tsc's useDefineForClassFields=false:
+        // fields are assigned with `=` rather than Object.defineProperty, and fields without an
+        // initializer are removed rather than set to undefined.
         assumptions: CompilerAssumptions {
             set_public_class_fields: true,
             ..Default::default()
@@ -361,9 +360,10 @@ fn render_errors(
         .collect()
 }
 
-// Parses once and emits JS and/or declaration outputs from the same AST.
-// Declarations are emitted first, before the transformer mutates the program.
+// Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
+// first, before the transformer mutates the program.
 fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
+    // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
     let source_type = SourceType::from_path(filename)
         .unwrap_or_default()
         .with_typescript(true);
@@ -419,12 +419,11 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             return result;
         }
 
-        // The transformer rewrites `export =`/`import x = require(...)` and erases type-only
-        // imports, but oxc has no ESM-to-CommonJS transform: any module syntax still present
-        // cannot be emitted as CommonJS. That includes `import.meta` expressions (recorded in the
-        // module record) and top-level await (found by an AST walk). An empty `export {}`
-        // (hand-written, or appended by the transformer after erasing a file's only module
-        // syntax) is dropped instead, matching tsc.
+        // The transformer rewrites `export =`/`import x = require(...)` and erases type-only imports,
+        // but oxc has no ESM-to-CommonJS transform: any module syntax still present cannot be emitted
+        // as CommonJS. That includes `import.meta` (recorded in the module record) and top-level await
+        // (found by an AST walk). An empty `export {}` — hand-written, or appended by the transformer
+        // after erasing a file's only module syntax — is dropped instead, matching tsc.
         if options.module.is_commonjs() {
             use oxc::span::GetSpan;
             parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
@@ -484,16 +483,13 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
     result
 }
 
-// Node's ESM loader requires fully-specified relative specifiers: no directory
-// imports and no extensionless imports. TS's "bundler" moduleResolution allows
-// omitting the extension (and importing a directory whose index file resolves
-// it), so we resolve those against the sibling source files on disk here —
-// mirroring what swc's `module.resolveFully` option already does for the swc
-// transpiler path.
+// Node's ESM loader requires fully-specified relative specifiers: no directory imports and no
+// extensionless imports. TS's "bundler" moduleResolution allows both (omitting the extension, or
+// importing a directory resolved via its index file), so those are resolved here against the
+// source files on disk.
 //
-// Extensioned specifiers are left alone: rewriting TypeScript extensions is handled by the
-// transformer's `rewrite_import_extensions` option. Static imports are top-level only, so no
-// full AST walk is needed.
+// Extensioned specifiers are left alone: rewriting TypeScript extensions is the transformer's
+// `rewrite_import_extensions` option. Static imports are top-level only, so no full AST walk is needed.
 fn resolve_relative_specifiers<'a>(
     program: &mut Program<'a>,
     allocator: &'a Allocator,
@@ -521,8 +517,7 @@ fn resolve_relative_specifiers<'a>(
     }
 }
 
-// TypeScript sources first: with both foo.ts and foo.js present, tsc
-// resolves "./foo" to foo.ts.
+// TypeScript sources first: with both foo.ts and foo.js present, tsc resolves "./foo" to foo.ts.
 const RESOLVABLE_EXTS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
 fn js_ext_for(src_ext: &str) -> &'static str {
@@ -555,11 +550,10 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-// Paths to probe for a relative specifier: the normalized import target first, then — when the
-// target lies under one of the root_dirs, taking the longest matching root like tsc — the same
-// relative location under each other root, mirroring how tsc's rootDirs overlays the roots into
-// one virtual directory. Matching against the target rather than the importer's directory keeps
-// "../" specifiers that cross out of an overlapping root resolvable.
+// Paths to probe for a relative specifier: the normalized import target first, then — when it lies
+// under a root_dir, taking the longest matching root like tsc — the same relative location under each
+// other root, mirroring how tsc's rootDirs overlays the roots into one virtual directory. Matching the
+// target rather than the importer's directory keeps "../" specifiers that leave an overlapping root resolvable.
 fn candidate_targets(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let target = normalize(&base_dir.join(specifier));
     let mut targets = vec![target.clone()];
@@ -600,9 +594,8 @@ fn resolve_specifier_across(
         return None;
     }
 
-    // Each candidate target is resolved completely (files, declarations, then index files) before
-    // moving to the next, matching tsc: a directory's own index file wins over a file at the same
-    // specifier in a later root.
+    // Each candidate target is resolved completely (files, declarations, then index files) before moving
+    // to the next, matching tsc: a directory's own index file wins over a file in a later root.
     for target in candidate_targets(base_dir, specifier, root_dirs) {
         for ext in RESOLVABLE_EXTS {
             if target.with_extension(ext).is_file() {
@@ -697,9 +690,8 @@ mod tests {
         assert!(!js.contains("??"), "js: {js}");
     }
 
-    // Downleveled async functions need the asyncToGenerator helper, which the
-    // transformer imports from @oxc-project/runtime: that package must be a
-    // runtime dependency when targets below es2017 are used with async code.
+    // Downleveled async functions need the asyncToGenerator helper, imported from @oxc-project/runtime:
+    // that package must be a runtime dependency when targets below es2017 are used with async code.
     #[test]
     fn target_downlevels_async_with_runtime_helper() {
         let result = transpile(
@@ -806,8 +798,8 @@ mod tests {
         assert!(!js.contains("use strict"), "js: {js}");
     }
 
-    // With module=esm, oxc reports TypeScript's CommonJS-specific syntax as errors
-    // (TS1203/TS1202) instead of rewriting it.
+    // With module=esm, oxc reports TypeScript's CommonJS-specific syntax as errors (TS1203/TS1202)
+    // instead of rewriting it.
     #[test]
     fn esm_rejects_export_assignment() {
         let result = transpile("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
@@ -933,9 +925,7 @@ mod tests {
         );
     }
 
-    // import.meta is an expression, not a module-declaration statement, and Node rejects it in
-    // CommonJS files; it must be caught via the module record. (.cts sources are already rejected
-    // by the parser, so use a .ts source.)
+    // Uses a .ts source: the parser already rejects top-level await in .cts files.
     #[test]
     fn commonjs_rejects_top_level_await() {
         let result = transpile(
@@ -982,6 +972,8 @@ mod tests {
         assert!(result.js_code.unwrap().contains("module.exports = g"));
     }
 
+    // import.meta is an expression, not a module-declaration statement, so it is caught via the module
+    // record; Node rejects it in CommonJS files. (.ts source: the parser already rejects it in .cts.)
     #[test]
     fn commonjs_rejects_import_meta() {
         let result = transpile(
@@ -998,8 +990,8 @@ mod tests {
         assert!(result.js_code.is_none());
     }
 
-    // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that
-    // in any module mode), ESM stays ESM, and no "use strict" is added.
+    // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that in
+    // any module mode), ESM stays ESM, and no "use strict" is added.
     #[test]
     fn preserve_keeps_esm_and_omits_use_strict() {
         let result = transpile(
@@ -1458,9 +1450,8 @@ mod tests {
         assert!(js.contains("import(\"./c.mjs\")"), "js: {js}");
     }
 
-    // Dynamic imports only get the extension rewrite: extensionless
-    // specifiers are not resolved against files on disk, unlike static
-    // imports.
+    // Dynamic imports only get the extension rewrite: extensionless specifiers are not resolved
+    // against files on disk, unlike static imports.
     #[test]
     fn transpile_leaves_extensionless_dynamic_import() {
         let dir = test_dir("transpile_dynamic_import_extensionless");

@@ -388,3 +388,36 @@ diff_test(
     file1 = "onlytypes/main.d.ts",
     file2 = "snapshots/main.d.ts",
 )
+
+# target: downlevel JS outputs like tsc's target. es2015 transforms the exponent operator,
+# optional chaining, and async functions; downleveled async imports the asyncToGenerator helper
+# from @oxc-project/runtime.
+oxc_transpiler(
+    name = "transpile_target_es2015",
+    srcs = ["src/modern.ts"],
+    out_dir = "targetes2015",
+    root_dir = "src",
+    target = "es2015",
+)
+
+diff_test(
+    name = "target_es2015_test",
+    file1 = "targetes2015/modern.js",
+    file2 = "snapshots/modern_es2015.js",
+)
+
+# es2019 only downlevels features newer than it: optional chaining and nullish coalescing are
+# transformed, exponent and async are kept.
+oxc_transpiler(
+    name = "transpile_target_es2019",
+    srcs = ["src/modern.ts"],
+    out_dir = "targetes2019",
+    root_dir = "src",
+    target = "es2019",
+)
+
+diff_test(
+    name = "target_es2019_test",
+    file1 = "targetes2019/modern.js",
+    file2 = "snapshots/modern_es2019.js",
+)

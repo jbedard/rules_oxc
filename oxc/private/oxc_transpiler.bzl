@@ -140,6 +140,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--source-maps")
         if ctx.attr.rewrite_extensions:
             args.add("--rewrite-extensions")
+        if ctx.attr.target:
+            args.add("--target", ctx.attr.target)
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
@@ -309,6 +311,32 @@ _oxc_transpiler_rule = rule(
             default = False,
             doc = "Emit a .js.map source map file alongside each JS output.",
         ),
+        "target": attr.string(
+            doc = "Downlevel the JS outputs to an ECMAScript target (e.g. " +
+                  "\"es2017\"), like tsc's target. Defaults to the latest ES " +
+                  "version: syntax is left as written. es5 is not allowed: oxc " +
+                  "cannot fully downlevel ES2015 syntax. Transforms that need a " +
+                  "runtime helper (e.g. async functions below es2017) import it " +
+                  "from @oxc-project/runtime, which must then be added as a " +
+                  "runtime dependency. Declaration outputs are unaffected.",
+            values = [
+                "",
+                "es6",
+                "es2015",
+                "es2016",
+                "es2017",
+                "es2018",
+                "es2019",
+                "es2020",
+                "es2021",
+                "es2022",
+                "es2023",
+                "es2024",
+                "es2025",
+                "es2026",
+                "esnext",
+            ],
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -337,6 +365,7 @@ def oxc_transpiler(
         emit_dts = False,
         source_maps = False,
         rewrite_extensions = False,
+        target = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -352,5 +381,6 @@ def oxc_transpiler(
         emit_dts = emit_dts,
         source_maps = source_maps or False,
         rewrite_extensions = rewrite_extensions or False,
+        target = target or "",
         **kwargs
     )

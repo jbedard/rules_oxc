@@ -1,8 +1,40 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("//oxc:defs.bzl", "oxc_transpiler")
 
 package(default_testonly = True)
+
+# Targets carrying JsInfo are allowed in srcs; their outputs are not pre-declared.
+js_library(
+    name = "legacy_lib",
+    srcs = ["src/legacy.js"],
+)
+
+oxc_transpiler(
+    name = "transpile_target_srcs",
+    srcs = [
+        "src/main.ts",
+        "src/util.mts",
+        ":legacy_lib",
+    ],
+    out_dir = "targetsrcs",
+    root_dir = "src",
+)
+
+build_test(
+    name = "target_srcs_test",
+    targets = [
+        ":transpile_target_srcs",
+        "targetsrcs/main.js",
+    ],
+)
+
+diff_test(
+    name = "js_target_srcs_test",
+    file1 = "targetsrcs/main.js",
+    file2 = "snapshots/main.js",
+)
 
 # The "src/*.ts" glob also matches src/types.d.ts: declaration sources are
 # skipped by the rule and must not break the build or produce outputs.

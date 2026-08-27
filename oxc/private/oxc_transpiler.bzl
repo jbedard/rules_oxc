@@ -100,7 +100,14 @@ def _to_json_out(src, out_dir, root_dir):
 def _calculate_outs(srcs, to_out, *args):
     outs = []
     for src in srcs:
-        out = to_out(str(src), *args)
+        src = str(src)
+
+        # Extensionless labels are targets whose files are only known at analysis time.
+        basename = src[max(src.rfind("/"), src.rfind(":")) + 1:]
+        if "." not in basename:
+            continue
+
+        out = to_out(src, *args)
         if out:
             outs.append(out)
     return outs

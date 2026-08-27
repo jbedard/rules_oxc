@@ -46,6 +46,13 @@ struct Options {
     // Directories forming one virtual directory for resolving relative specifiers, like tsc's
     // rootDirs. Empty means only the source's own directory is searched.
     root_dirs: Vec<PathBuf>,
+    // Module the automatic JSX runtime is imported from (oxc's import_source), tsc's
+    // jsxImportSource. Defaults to "react".
+    jsx_import_source: Option<String>,
+    // Factory and fragment for the classic JSX runtime (oxc's pragma/pragma_frag), tsc's
+    // jsxFactory/jsxFragmentFactory. Default to React.createElement and React.Fragment.
+    jsx_pragma: Option<String>,
+    jsx_pragma_frag: Option<String>,
 }
 
 struct Entry {
@@ -104,6 +111,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             helpers_module: None,
             module: Module::Preserve,
             root_dirs: Vec::new(),
+            jsx_import_source: None,
+            jsx_pragma: None,
+            jsx_pragma_frag: None,
         },
         manifest_path: None,
         positional: Vec::new(),
@@ -125,6 +135,24 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                         )]);
                     }
                 };
+            }
+            "--jsx-import-source" => {
+                cli.options.jsx_import_source = Some(
+                    args.next()
+                        .ok_or_else(|| vec!["error: --jsx-import-source requires a value".to_string()])?,
+                );
+            }
+            "--jsx-pragma" => {
+                cli.options.jsx_pragma = Some(
+                    args.next()
+                        .ok_or_else(|| vec!["error: --jsx-pragma requires a value".to_string()])?,
+                );
+            }
+            "--jsx-pragma-frag" => {
+                cli.options.jsx_pragma_frag = Some(
+                    args.next()
+                        .ok_or_else(|| vec!["error: --jsx-pragma-frag requires a value".to_string()])?,
+                );
             }
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
             "--target" => {
@@ -158,6 +186,20 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             }
             _ => cli.positional.push(arg),
         }
+    }
+
+    if cli.options.jsx_import_source.is_some() && cli.options.jsx != JsxRuntime::Automatic {
+        return Err(vec![
+            "error: --jsx-import-source requires --jsx automatic".to_string(),
+        ]);
+    }
+
+    if (cli.options.jsx_pragma.is_some() || cli.options.jsx_pragma_frag.is_some())
+        && cli.options.jsx != JsxRuntime::Classic
+    {
+        return Err(vec![
+            "error: --jsx-pragma and --jsx-pragma-frag require --jsx classic".to_string(),
+        ]);
     }
 
     if !cli.options.emit_js && !cli.options.emit_dts {
@@ -296,17 +338,32 @@ fn build_transform_options(options: &Options) -> TransformOptions {
             set_public_class_fields: true,
             ..Default::default()
         },
-        typescript: TypeScriptOptions {
-            remove_class_fields_without_initializer: true,
-            // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any slash-containing
-            // .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always maps to .js (never .jsx).
-            rewrite_import_extensions: options
-                .rewrite_extensions
-                .then_some(RewriteExtensionsMode::Rewrite),
-            ..Default::default()
+        typescript: {
+            let mut typescript = TypeScriptOptions {
+                remove_class_fields_without_initializer: true,
+                // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any
+                // slash-containing .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always
+                // maps to .js (never .jsx).
+                rewrite_import_extensions: options
+                    .rewrite_extensions
+                    .then_some(RewriteExtensionsMode::Rewrite),
+                ..Default::default()
+            };
+            // The TypeScript transform must know the classic pragma so its import is not
+            // stripped as type-only/unused.
+            if let Some(pragma) = &options.jsx_pragma {
+                typescript.jsx_pragma = pragma.clone().into();
+            }
+            if let Some(pragma_frag) = &options.jsx_pragma_frag {
+                typescript.jsx_pragma_frag = pragma_frag.clone().into();
+            }
+            typescript
         },
         jsx: JsxOptions {
             runtime: options.jsx,
+            import_source: options.jsx_import_source.clone(),
+            pragma: options.jsx_pragma.clone(),
+            pragma_frag: options.jsx_pragma_frag.clone(),
             ..JsxOptions::default()
         },
         env: {
@@ -565,6 +622,9 @@ mod tests {
             helpers_module: None,
             module: Module::Preserve,
             root_dirs: Vec::new(),
+            jsx_import_source: None,
+            jsx_pragma: None,
+            jsx_pragma_frag: None,
         }
     }
 
@@ -1005,6 +1065,75 @@ mod tests {
         assert!(js.contains("React.createElement"), "js: {js}");
         assert!(!js.contains("react/jsx-runtime"), "js: {js}");
         assert!(!js.contains("<div"), "js: {js}");
+    }
+
+    // jsxImportSource: the automatic runtime imports from the given module.
+    #[test]
+    fn jsx_import_source_changes_runtime_module() {
+        let options = Options {
+            emit_dts: false,
+            jsx_import_source: Some("preact".to_string()),
+            ..default_options()
+        };
+        let result = transpile("a.tsx", "export const el = <div />;\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"preact/jsx-runtime\""), "js: {js}");
+        assert!(!js.contains("\"react/jsx-runtime\""), "js: {js}");
+    }
+
+    // jsxFactory/jsxFragmentFactory: the classic runtime uses the given pragma, and the pragma's
+    // import survives type stripping.
+    #[test]
+    fn jsx_pragma_changes_classic_factory() {
+        let options = Options {
+            emit_dts: false,
+            jsx: JsxRuntime::Classic,
+            jsx_pragma: Some("h".to_string()),
+            jsx_pragma_frag: Some("Fragment".to_string()),
+            ..default_options()
+        };
+        let result = transpile(
+            "a.tsx",
+            "import { h, Fragment } from \"preact\";\nexport const el = <div><span /></div>;\nexport const frag = <></>;\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("h(\"div\""), "js: {js}");
+        assert!(js.contains("h(Fragment"), "js: {js}");
+        assert!(js.contains("import { h, Fragment } from \"preact\""), "js: {js}");
+        assert!(!js.contains("React.createElement"), "js: {js}");
+    }
+
+    #[test]
+    fn run_rejects_jsx_import_source_with_classic() {
+        let err = run(args(&[
+            "--emit-js",
+            "--jsx",
+            "classic",
+            "--jsx-import-source",
+            "preact",
+        ]))
+        .unwrap_err();
+        assert_eq!(err, vec!["error: --jsx-import-source requires --jsx automatic".to_string()]);
+    }
+
+    #[test]
+    fn run_rejects_jsx_pragma_with_automatic() {
+        let err = run(args(&["--emit-js", "--jsx-pragma", "h"])).unwrap_err();
+        assert_eq!(
+            err,
+            vec!["error: --jsx-pragma and --jsx-pragma-frag require --jsx classic".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_requires_jsx_option_values() {
+        for flag in ["--jsx-import-source", "--jsx-pragma", "--jsx-pragma-frag"] {
+            let err = run(args(&["--emit-js", flag])).unwrap_err();
+            assert_eq!(err, vec![format!("error: {flag} requires a value")]);
+        }
     }
 
     #[test]

@@ -20,21 +20,15 @@ use oxc::transformer::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// JSX handling, using oxc's terminology: the "automatic" and "classic" runtimes of the JSX transform
-// (tsc's jsx=react-jsx and jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under
-// Node, and a JSX-aware bundler consumes the .tsx sources directly.
-#[derive(Clone, Copy, PartialEq)]
-enum JsxMode {
-    Automatic,
-    Classic,
-}
-
 #[derive(Clone)]
 struct Options {
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
-    jsx: JsxMode,
+    // The "automatic" or "classic" runtime of the JSX transform (tsc's jsx=react-jsx and
+    // jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under Node, and a
+    // JSX-aware bundler consumes the .tsx sources directly.
+    jsx: JsxRuntime,
     rewrite_extensions: bool,
     // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's `target`; None keeps the latest syntax.
     env: Option<EnvOptions>,
@@ -81,12 +75,12 @@ fn flag_value(
     args.next().ok_or_else(|| vec![format!("error: {flag} requires {what}")])
 }
 
-fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
+fn run(mut args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     let mut options = Options {
         emit_js: false,
         emit_dts: false,
         source_maps: false,
-        jsx: JsxMode::Automatic,
+        jsx: JsxRuntime::Automatic,
         rewrite_extensions: false,
         env: None,
         helpers_module: None,
@@ -95,18 +89,17 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
-    let mut args_iter = args;
 
-    while let Some(arg) = args_iter.next() {
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--emit-js" => options.emit_js = true,
             "--emit-dts" => options.emit_dts = true,
             "--source-maps" => options.source_maps = true,
             "--jsx" => {
-                let value = flag_value(&mut args_iter, &arg, "a value")?;
+                let value = flag_value(&mut args, &arg, "a value")?;
                 options.jsx = match value.as_str() {
-                    "automatic" => JsxMode::Automatic,
-                    "classic" => JsxMode::Classic,
+                    "automatic" => JsxRuntime::Automatic,
+                    "classic" => JsxRuntime::Classic,
                     _ => {
                         return Err(vec![format!(
                             "error: unsupported --jsx \"{value}\": expected \"automatic\" or \"classic\""
@@ -116,17 +109,17 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             }
             "--rewrite-extensions" => options.rewrite_extensions = true,
             "--target" => {
-                let target = flag_value(&mut args_iter, &arg, "a value")?;
+                let target = flag_value(&mut args, &arg, "a value")?;
                 options.env = Some(
                     EnvOptions::from_target(&target)
                         .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
                 );
             }
             "--helpers-module" => {
-                options.helpers_module = Some(flag_value(&mut args_iter, &arg, "a value")?);
+                options.helpers_module = Some(flag_value(&mut args, &arg, "a value")?);
             }
             "--module" => {
-                let value = flag_value(&mut args_iter, &arg, "a value")?;
+                let value = flag_value(&mut args, &arg, "a value")?;
                 options.module = match value.as_str() {
                     "preserve" => Module::Preserve,
                     "esm" => Module::Esm,
@@ -139,10 +132,10 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
                 };
             }
             "--root-dirs" => {
-                options.root_dirs.push(PathBuf::from(flag_value(&mut args_iter, &arg, "a path")?));
+                options.root_dirs.push(PathBuf::from(flag_value(&mut args, &arg, "a path")?));
             }
             "--manifest" => {
-                manifest_path = Some(flag_value(&mut args_iter, &arg, "a file path")?);
+                manifest_path = Some(flag_value(&mut args, &arg, "a file path")?);
             }
             _ => positional.push(arg),
         }
@@ -278,12 +271,9 @@ fn build_transform_options(options: &Options) -> TransformOptions {
                 .then_some(RewriteExtensionsMode::Rewrite),
             ..Default::default()
         },
-        jsx: match options.jsx {
-            JsxMode::Automatic => JsxOptions::default(),
-            JsxMode::Classic => JsxOptions {
-                runtime: JsxRuntime::Classic,
-                ..JsxOptions::default()
-            },
+        jsx: JsxOptions {
+            runtime: options.jsx,
+            ..JsxOptions::default()
         },
         env: {
             let mut env = options.env.clone().unwrap_or_default();
@@ -506,7 +496,7 @@ fn resolve_relative_specifiers<'a>(
 }
 
 // TypeScript sources first: with both foo.ts and foo.js present, tsc resolves "./foo" to foo.ts.
-const RESOLVABLE_EXTS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+const RESOLVABLE_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
 fn js_ext_for(src_ext: &str) -> &'static str {
     match src_ext {
@@ -518,8 +508,8 @@ fn js_ext_for(src_ext: &str) -> &'static str {
 
 // Declaration-only targets resolve like tsc: importing "./gen" where only gen.d.ts exists emits
 // "./gen.js", assuming the implementation exists at runtime.
-const DECLARATION_SUFFIXES: [(&str, &str); 3] =
-    [(".d.ts", "js"), (".d.mts", "mjs"), (".d.cts", "cjs")];
+const DECLARATION_SUFFIXES: &[(&str, &str)] =
+    &[(".d.ts", "js"), (".d.mts", "mjs"), (".d.cts", "cjs")];
 
 // Lexically fold "." and ".." components so root prefixes match without filesystem access.
 fn normalize(path: &Path) -> PathBuf {
@@ -591,13 +581,13 @@ fn resolve_specifier(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) ->
 // The emitted JS extension for a source or declaration file existing at `target` with any
 // resolvable extension appended, or None when no such file exists.
 fn probe(target: &Path) -> Option<&'static str> {
-    for ext in RESOLVABLE_EXTS {
+    for &ext in RESOLVABLE_EXTS {
         if target.with_extension(ext).is_file() {
             return Some(js_ext_for(ext));
         }
     }
 
-    for (suffix, js_ext) in DECLARATION_SUFFIXES {
+    for &(suffix, js_ext) in DECLARATION_SUFFIXES {
         let mut decl = target.to_path_buf().into_os_string();
         decl.push(suffix);
         if Path::new(&decl).is_file() {
@@ -617,7 +607,7 @@ mod tests {
             emit_js: true,
             emit_dts: true,
             source_maps: false,
-            jsx: JsxMode::Automatic,
+            jsx: JsxRuntime::Automatic,
             rewrite_extensions: false,
             env: None,
             helpers_module: None,
@@ -1070,7 +1060,7 @@ mod tests {
     // providing React is the caller's concern, as with tsc's jsx=react.
     #[test]
     fn jsx_classic_uses_create_element() {
-        let options = Options { jsx: JsxMode::Classic, ..js_options() };
+        let options = Options { jsx: JsxRuntime::Classic, ..js_options() };
         let js = transpile_js("a.tsx", "export const el: object = <div id={1} />;\n", &options);
         assert!(js.contains("React.createElement"), "js: {js}");
         assert!(!js.contains("react/jsx-runtime"), "js: {js}");

@@ -3,7 +3,10 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_binary(
     name = "transpiler",
-    srcs = ["transpiler.rs"],
+    srcs = [
+        "resolver.rs",
+        "transpiler.rs",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "@oxc_crates//:oxc",

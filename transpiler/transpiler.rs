@@ -1,6 +1,10 @@
 use oxc::allocator::Allocator;
-use oxc::ast::ast::{Expression, ImportExpression, Program, Statement, StringLiteral};
-use oxc::ast_visit::{VisitMut, walk_mut};
+use oxc::ast::ast::{
+    ArrowFunctionExpression, AwaitExpression, Expression, ForOfStatement, Function,
+    ImportExpression, Program, Statement, StringLiteral,
+};
+use oxc::ast_visit::{Visit, VisitMut, walk, walk_mut};
+use oxc::syntax::scope::ScopeFlags;
 use oxc::codegen::{Codegen, CodegenOptions};
 use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource};
 use oxc::isolated_declarations::{
@@ -10,7 +14,7 @@ use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
 use oxc::transformer::{
-    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime,
+    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime, Module,
     TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
@@ -38,6 +42,11 @@ struct Options {
     // Module to import runtime helpers from, defaulting to @oxc-project/runtime. Helpers are
     // always imported (like tsc's importHelpers): oxc has no inline helper mode.
     helpers_module: Option<String>,
+    // Module format of the output, using oxc's Module values. Preserve keeps the input syntax.
+    // Esm makes TypeScript's CommonJS-specific syntax (`export =`, `import x = require(...)`) an
+    // error. CommonJS rewrites that syntax and adds "use strict"; oxc has no ESM-to-CJS
+    // transform, so remaining ESM syntax is an error.
+    module: Module,
 }
 
 struct Entry {
@@ -64,6 +73,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         rewrite_extensions: false,
         env: None,
         helpers_module: None,
+        module: Module::Preserve,
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -107,6 +117,21 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
                         .next()
                         .ok_or_else(|| vec!["error: --helpers-module requires a value".to_string()])?,
                 );
+            }
+            "--module" => {
+                let value = args_iter
+                    .next()
+                    .ok_or_else(|| vec!["error: --module requires a value".to_string()])?;
+                options.module = match value.as_str() {
+                    "preserve" => Module::Preserve,
+                    "esm" => Module::Esm,
+                    "commonjs" => Module::CommonJS,
+                    _ => {
+                        return Err(vec![format!(
+                            "error: unsupported --module \"{value}\": expected \"preserve\", \"esm\", or \"commonjs\""
+                        )]);
+                    }
+                };
             }
             "--manifest" => {
                 manifest_path = Some(
@@ -187,6 +212,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             rewrite_extensions: options.rewrite_extensions,
             env: options.env.clone(),
             helpers_module: options.helpers_module.clone(),
+            module: options.module,
         };
         let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
@@ -249,7 +275,11 @@ fn transform_options(options: &Options) -> TransformOptions {
             // Like tsc's jsx=preserve: strip types but leave JSX untouched.
             JsxMode::Preserve => JsxOptions::disable(),
         },
-        env: options.env.clone().unwrap_or_default(),
+        env: {
+            let mut env = options.env.clone().unwrap_or_default();
+            env.module = options.module;
+            env
+        },
         // Helpers are imported like tsc's importHelpers (oxc's only implemented mode);
         // --helpers-module redirects the imports away from the default @oxc-project/runtime.
         helper_loader: HelperLoaderOptions {
@@ -260,6 +290,40 @@ fn transform_options(options: &Options) -> TransformOptions {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+// Finds module-level await (await expressions and `for await` outside any function), which is
+// ESM-only syntax that oxc cannot rewrite for CommonJS.
+struct TopLevelAwaitFinder {
+    spans: Vec<oxc::span::Span>,
+}
+
+impl<'a> Visit<'a> for TopLevelAwaitFinder {
+    fn visit_await_expression(&mut self, expr: &AwaitExpression<'a>) {
+        self.spans.push(expr.span);
+        walk::walk_await_expression(self, expr);
+    }
+
+    fn visit_for_of_statement(&mut self, stmt: &ForOfStatement<'a>) {
+        if stmt.r#await {
+            self.spans.push(stmt.span);
+        }
+        walk::walk_for_of_statement(self, stmt);
+    }
+
+    // Await inside any function belongs to that function, not the module.
+    fn visit_function(&mut self, _func: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _func: &ArrowFunctionExpression<'a>) {}
+}
+
+// An `export {}` with no specifiers: it only marks the file as a module and has no CommonJS
+// equivalent. (Exports with a declaration or a source are separate AST variants.)
+fn is_empty_export(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::ExportNamedDeclaration(decl) => decl.specifiers.is_empty(),
+        _ => false,
     }
 }
 
@@ -336,6 +400,48 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         if !diagnostics.is_empty() {
             result.errors = render_errors(filename, source_text, diagnostics.into_iter());
             return result;
+        }
+
+        // The transformer rewrites `export =`/`import x = require(...)` and erases type-only
+        // imports, but oxc has no ESM-to-CommonJS transform: any module syntax still present
+        // cannot be emitted as CommonJS. That includes `import.meta` expressions (recorded in the
+        // module record) and top-level await (found by an AST walk). An empty `export {}`
+        // (hand-written, or appended by the transformer after erasing a file's only module
+        // syntax) is dropped instead, matching tsc.
+        if options.module.is_commonjs() {
+            use oxc::span::GetSpan;
+            parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
+            let mut await_finder = TopLevelAwaitFinder { spans: Vec::new() };
+            await_finder.visit_program(&parser_ret.program);
+            let esm_diagnostics: Vec<_> = parser_ret
+                .program
+                .body
+                .iter()
+                .filter(|stmt| stmt.is_module_declaration())
+                .map(|stmt| {
+                    oxc::diagnostics::OxcDiagnostic::error(
+                        "ESM import/export syntax cannot be emitted as CommonJS: \
+                         oxc only rewrites TypeScript `export =` and `import x = require(...)`",
+                    )
+                    .with_label(stmt.span())
+                })
+                .chain(parser_ret.module_record.import_metas.iter().map(|span| {
+                    oxc::diagnostics::OxcDiagnostic::error(
+                        "import.meta cannot be emitted as CommonJS",
+                    )
+                    .with_label(*span)
+                }))
+                .chain(await_finder.spans.iter().map(|span| {
+                    oxc::diagnostics::OxcDiagnostic::error(
+                        "top-level await cannot be emitted as CommonJS",
+                    )
+                    .with_label(*span)
+                }))
+                .collect();
+            if !esm_diagnostics.is_empty() {
+                result.errors = render_errors(filename, source_text, esm_diagnostics.into_iter());
+                return result;
+            }
         }
 
         resolve_relative_specifiers(
@@ -531,6 +637,7 @@ mod tests {
             rewrite_extensions: false,
             env: None,
             helpers_module: None,
+            module: Module::Preserve,
         }
     }
 
@@ -538,6 +645,22 @@ mod tests {
         Options {
             emit_dts: false,
             env: Some(EnvOptions::from_target(target).unwrap()),
+            ..default_options()
+        }
+    }
+
+    fn commonjs_options() -> Options {
+        Options {
+            emit_dts: false,
+            module: Module::CommonJS,
+            ..default_options()
+        }
+    }
+
+    fn esm_options() -> Options {
+        Options {
+            emit_dts: false,
+            module: Module::Esm,
             ..default_options()
         }
     }
@@ -656,6 +779,242 @@ mod tests {
     fn run_requires_helpers_module_value() {
         let err = run(args(&["--emit-js", "--helpers-module"])).unwrap_err();
         assert_eq!(err, vec!["error: --helpers-module requires a value".to_string()]);
+    }
+
+    #[test]
+    fn esm_keeps_esm_syntax() {
+        let result = transpile(
+            "a.ts",
+            "import { helper } from \"./b.js\";\nexport const x: number = helper;\n",
+            &esm_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("import { helper } from \"./b.js\""), "js: {js}");
+        assert!(js.contains("export const x = helper"), "js: {js}");
+        assert!(!js.contains("use strict"), "js: {js}");
+    }
+
+    // With module=esm, oxc reports TypeScript's CommonJS-specific syntax as errors
+    // (TS1203/TS1202) instead of rewriting it.
+    #[test]
+    fn esm_rejects_export_assignment() {
+        let result = transpile("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors.concat().contains("Export assignment cannot be used"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn esm_rejects_import_equals() {
+        let result = transpile(
+            "a.ts",
+            "import path = require(\"node:path\");\nexport const s: string = path.sep;\n",
+            &esm_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors.concat().contains("Import assignment cannot be used"),
+            "errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn commonjs_transforms_export_assignment() {
+        let result = transpile(
+            "a.cts",
+            "const answer: number = 42;\nexport = { answer };\n",
+            &commonjs_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"use strict\""), "js: {js}");
+        assert!(js.contains("module.exports = { answer }"), "js: {js}");
+    }
+
+    #[test]
+    fn commonjs_transforms_import_equals() {
+        let result = transpile(
+            "a.cts",
+            "import path = require(\"node:path\");\nexport = path.sep;\n",
+            &commonjs_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("require(\"node:path\")"), "js: {js}");
+        assert!(!js.contains("import "), "js: {js}");
+    }
+
+    #[test]
+    fn commonjs_erases_type_only_imports() {
+        let result = transpile(
+            "a.cts",
+            "import type { Dirent } from \"node:fs\";\nexport = (d: Dirent): string => d.name;\n",
+            &commonjs_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("node:fs"), "js: {js}");
+        assert!(!js.contains("export {}"), "js: {js}");
+    }
+
+    // `export {}` only marks a file as a module; CommonJS output drops it.
+    #[test]
+    fn commonjs_drops_empty_export() {
+        let result = transpile(
+            "a.cts",
+            "const x: number = 1;\nexport = x;\nexport {};\n",
+            &commonjs_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("export {}"), "js: {js}");
+        assert!(js.contains("module.exports = x"), "js: {js}");
+    }
+
+    // `export {} from "..."` loads its source for side effects: it is a separate AST variant not
+    // matched by the empty-export drop, and is rejected like any other ESM syntax.
+    #[test]
+    fn commonjs_rejects_sourced_empty_export() {
+        let result = transpile(
+            "a.cts",
+            "const x: number = 1;\nexport = x;\nexport {} from \"./setup.cjs\";\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn commonjs_rejects_esm_import() {
+        let result = transpile(
+            "a.cts",
+            "import { x } from \"./b.cjs\";\nexport = x;\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn commonjs_rejects_esm_export() {
+        let result = transpile("a.cts", "export const x: number = 1;\n", &commonjs_options());
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+    }
+
+    // import.meta is an expression, not a module-declaration statement, and Node rejects it in
+    // CommonJS files; it must be caught via the module record. (.cts sources are already rejected
+    // by the parser, so use a .ts source.)
+    #[test]
+    fn commonjs_rejects_top_level_await() {
+        let result = transpile(
+            "a.ts",
+            "async function load(): Promise<number> { return 1; }\n\
+             const value: number = await load();\nexport = value;\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn commonjs_rejects_top_level_for_await() {
+        let result = transpile(
+            "a.ts",
+            "declare const items: AsyncIterable<number>;\nfor await (const item of items) {\n}\n\
+             export = 1;\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+    }
+
+    // Await inside a function is not top-level and stays valid in CommonJS.
+    #[test]
+    fn commonjs_allows_await_inside_functions() {
+        let result = transpile(
+            "a.cts",
+            "async function f(): Promise<number> { return await Promise.resolve(1); }\n\
+             const g = async (): Promise<number> => await f();\nexport = g;\n",
+            &commonjs_options(),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("module.exports = g"));
+    }
+
+    #[test]
+    fn commonjs_rejects_import_meta() {
+        let result = transpile(
+            "a.ts",
+            "const url: string = import.meta.url;\nexport = url;\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("import.meta cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that
+    // in any module mode), ESM stays ESM, and no "use strict" is added.
+    #[test]
+    fn preserve_keeps_esm_and_omits_use_strict() {
+        let result = transpile(
+            "a.cts",
+            "export const x: number = 1;\n",
+            &Options {
+                emit_dts: false,
+                ..default_options()
+            },
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("export const x = 1"), "js: {js}");
+        assert!(!js.contains("use strict"), "js: {js}");
+    }
+
+    #[test]
+    fn run_requires_module_value() {
+        let err = run(args(&["--emit-js", "--module"])).unwrap_err();
+        assert_eq!(err, vec!["error: --module requires a value".to_string()]);
+    }
+
+    #[test]
+    fn run_rejects_unsupported_module() {
+        let err = run(args(&["--emit-js", "--module", "amd"])).unwrap_err();
+        assert!(err[0].contains("unsupported --module \"amd\""), "{err:?}");
     }
 
     #[test]

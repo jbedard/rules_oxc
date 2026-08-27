@@ -47,6 +47,9 @@ struct Options {
     // error. CommonJS rewrites that syntax and adds "use strict"; oxc has no ESM-to-CJS
     // transform, so remaining ESM syntax is an error.
     module: Module,
+    // Directories forming one virtual directory for resolving relative specifiers, like tsc's
+    // rootDirs. Empty means only the source's own directory is searched.
+    root_dirs: Vec<PathBuf>,
 }
 
 struct Entry {
@@ -74,6 +77,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         env: None,
         helpers_module: None,
         module: Module::Preserve,
+        root_dirs: Vec::new(),
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -132,6 +136,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
                         )]);
                     }
                 };
+            }
+            "--root-dirs" => {
+                options.root_dirs.push(PathBuf::from(
+                    args_iter
+                        .next()
+                        .ok_or_else(|| vec!["error: --root-dirs requires a path".to_string()])?,
+                ));
             }
             "--manifest" => {
                 manifest_path = Some(
@@ -213,6 +224,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             env: options.env.clone(),
             helpers_module: options.helpers_module.clone(),
             module: options.module,
+            root_dirs: options.root_dirs.clone(),
         };
         let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
@@ -449,6 +461,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             &allocator,
             Path::new(filename),
             !parser_ret.module_record.dynamic_imports.is_empty(),
+            &options.root_dirs,
             options.jsx == JsxMode::Preserve,
             options.rewrite_extensions,
         );
@@ -486,6 +499,7 @@ fn resolve_relative_specifiers<'a>(
     allocator: &'a Allocator,
     filename: &Path,
     has_dynamic_imports: bool,
+    root_dirs: &[PathBuf],
     preserve_jsx: bool,
     rewrite_extensions: bool,
 ) {
@@ -494,6 +508,7 @@ fn resolve_relative_specifiers<'a>(
     let mut rewriter = SpecifierRewriter {
         allocator,
         base_dir,
+        root_dirs,
         preserve_jsx,
         rewrite_extensions,
     };
@@ -524,15 +539,17 @@ fn resolve_relative_specifiers<'a>(
 struct SpecifierRewriter<'a, 'b> {
     allocator: &'a Allocator,
     base_dir: &'b Path,
+    root_dirs: &'b [PathBuf],
     preserve_jsx: bool,
     rewrite_extensions: bool,
 }
 
 impl<'a> SpecifierRewriter<'a, '_> {
     fn rewrite(&mut self, source: &mut StringLiteral<'a>) {
-        if let Some(resolved) = resolve_specifier(
+        if let Some(resolved) = resolve_specifier_across(
             self.base_dir,
             source.value.as_str(),
+            self.root_dirs,
             self.preserve_jsx,
             self.rewrite_extensions,
         ) {
@@ -586,9 +603,68 @@ fn rewrite_ts_extension(specifier: &str, preserve_jsx: bool) -> Option<String> {
     Some(format!("{stem}.{}", js_ext_for(ext, preserve_jsx)))
 }
 
+// Declaration-only targets resolve like tsc: importing "./gen" where only gen.d.ts exists emits
+// "./gen.js", assuming the implementation exists at runtime.
+const DECLARATION_SUFFIXES: [(&str, &str); 3] =
+    [(".d.ts", "js"), (".d.mts", "mjs"), (".d.cts", "cjs")];
+
+// Lexically fold "." and ".." components so root prefixes match without filesystem access.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+// Paths to probe for a relative specifier: the normalized import target first, then — when the
+// target lies under one of the root_dirs, taking the longest matching root like tsc — the same
+// relative location under each other root, mirroring how tsc's rootDirs overlays the roots into
+// one virtual directory. Matching against the target rather than the importer's directory keeps
+// "../" specifiers that cross out of an overlapping root resolvable.
+fn candidate_targets(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let target = normalize(&base_dir.join(specifier));
+    let mut targets = vec![target.clone()];
+
+    let longest = root_dirs
+        .iter()
+        .filter_map(|root| target.strip_prefix(root).ok().map(|rel| (root, rel.to_path_buf())))
+        .max_by_key(|(root, _)| root.components().count());
+
+    if let Some((longest_root, rel)) = longest {
+        for other in root_dirs {
+            if other != longest_root {
+                let candidate = other.join(&rel);
+                if !targets.contains(&candidate) {
+                    targets.push(candidate);
+                }
+            }
+        }
+    }
+    targets
+}
+
 fn resolve_specifier(
     base_dir: &Path,
     specifier: &str,
+    preserve_jsx: bool,
+    rewrite_extensions: bool,
+) -> Option<String> {
+    resolve_specifier_across(base_dir, specifier, &[], preserve_jsx, rewrite_extensions)
+}
+
+fn resolve_specifier_across(
+    base_dir: &Path,
+    specifier: &str,
+    root_dirs: &[PathBuf],
     preserve_jsx: bool,
     rewrite_extensions: bool,
 ) -> Option<String> {
@@ -604,20 +680,37 @@ fn resolve_specifier(
         return None;
     }
 
-    let target = base_dir.join(specifier);
-
-    for ext in RESOLVABLE_EXTS {
-        if target.with_extension(ext).is_file() {
-            return Some(format!("{specifier}.{}", js_ext_for(ext, preserve_jsx)));
+    // Each candidate target is resolved completely (files, declarations, then index files) before
+    // moving to the next, matching tsc: a directory's own index file wins over a file at the same
+    // specifier in a later root.
+    for target in candidate_targets(base_dir, specifier, root_dirs) {
+        for ext in RESOLVABLE_EXTS {
+            if target.with_extension(ext).is_file() {
+                return Some(format!("{specifier}.{}", js_ext_for(ext, preserve_jsx)));
+            }
         }
-    }
 
-    for ext in RESOLVABLE_EXTS {
-        if target.join(format!("index.{ext}")).is_file() {
-            return Some(format!(
-                "{specifier}/index.{}",
-                js_ext_for(ext, preserve_jsx)
-            ));
+        for (suffix, js_ext) in DECLARATION_SUFFIXES {
+            let mut decl = target.clone().into_os_string();
+            decl.push(suffix);
+            if Path::new(&decl).is_file() {
+                return Some(format!("{specifier}.{js_ext}"));
+            }
+        }
+
+        for ext in RESOLVABLE_EXTS {
+            if target.join(format!("index.{ext}")).is_file() {
+                return Some(format!(
+                    "{specifier}/index.{}",
+                    js_ext_for(ext, preserve_jsx)
+                ));
+            }
+        }
+
+        for (suffix, js_ext) in DECLARATION_SUFFIXES {
+            if target.join(format!("index{suffix}")).is_file() {
+                return Some(format!("{specifier}/index.{js_ext}"));
+            }
         }
     }
 
@@ -638,6 +731,7 @@ mod tests {
             env: None,
             helpers_module: None,
             module: Module::Preserve,
+            root_dirs: Vec::new(),
         }
     }
 
@@ -1316,6 +1410,179 @@ mod tests {
         assert_eq!(resolve_specifier(&dir, "./b.jsx", false, true), None);
         assert_eq!(resolve_specifier(&dir, "./b.mjs", false, true), None);
         assert_eq!(resolve_specifier(&dir, "./b.cjs", false, true), None);
+    }
+
+    #[test]
+    fn resolve_specifier_across_root_dirs() {
+        let dir = test_dir("resolve_root_dirs");
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::create_dir_all(dir.join("lib/sub")).unwrap();
+        fs::write(dir.join("lib/shared.ts"), "").unwrap();
+        fs::write(dir.join("lib/gen.d.ts"), "").unwrap();
+        fs::write(dir.join("lib/genm.d.mts"), "").unwrap();
+        fs::write(dir.join("lib/sub/index.ts"), "").unwrap();
+        let roots = [dir.join("app"), dir.join("lib")];
+        let base = dir.join("app");
+        assert_eq!(
+            resolve_specifier_across(&base, "./shared", &roots, false, false),
+            Some("./shared.js".to_string())
+        );
+        assert_eq!(
+            resolve_specifier_across(&base, "./gen", &roots, false, false),
+            Some("./gen.js".to_string())
+        );
+        assert_eq!(
+            resolve_specifier_across(&base, "./genm", &roots, false, false),
+            Some("./genm.mjs".to_string())
+        );
+        assert_eq!(
+            resolve_specifier_across(&base, "./sub", &roots, false, false),
+            Some("./sub/index.js".to_string())
+        );
+        assert_eq!(resolve_specifier_across(&base, "./missing", &roots, false, false), None);
+    }
+
+    #[test]
+    fn resolve_specifier_across_root_dirs_subdir() {
+        let dir = test_dir("resolve_root_dirs_subdir");
+        fs::create_dir_all(dir.join("app/deep")).unwrap();
+        fs::create_dir_all(dir.join("lib/deep")).unwrap();
+        fs::write(dir.join("lib/deep/util.ts"), "").unwrap();
+        let roots = [dir.join("app"), dir.join("lib")];
+        assert_eq!(
+            resolve_specifier_across(&dir.join("app/deep"), "./util", &roots, false, false),
+            Some("./util.js".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_specifier_prefers_own_dir_over_other_roots() {
+        let dir = test_dir("resolve_root_dirs_own_dir");
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("app/x.ts"), "").unwrap();
+        fs::write(dir.join("lib/x.mts"), "").unwrap();
+        let roots = [dir.join("app"), dir.join("lib")];
+        assert_eq!(
+            resolve_specifier_across(&dir.join("app"), "./x", &roots, false, false),
+            Some("./x.js".to_string())
+        );
+    }
+
+    // A directory's own index file wins over a file at the same specifier in a later root: each
+    // candidate dir is resolved completely before moving on, matching tsc.
+    #[test]
+    fn resolve_specifier_own_index_beats_other_root_file() {
+        let dir = test_dir("resolve_root_dirs_index_first");
+        fs::create_dir_all(dir.join("app/x")).unwrap();
+        fs::create_dir_all(dir.join("generated")).unwrap();
+        fs::write(dir.join("app/x/index.ts"), "").unwrap();
+        fs::write(dir.join("generated/x.mts"), "").unwrap();
+        let roots = [dir.join("app"), dir.join("generated")];
+        assert_eq!(
+            resolve_specifier_across(&dir.join("app"), "./x", &roots, false, false),
+            Some("./x/index.js".to_string())
+        );
+    }
+
+    // With overlapping roots only the longest root containing the source maps to the others:
+    // a source under src/gen must not be treated as living at src's "gen" subdirectory.
+    #[test]
+    fn resolve_specifier_uses_longest_matching_root() {
+        let dir = test_dir("resolve_root_dirs_longest");
+        fs::create_dir_all(dir.join("src/gen")).unwrap();
+        fs::create_dir_all(dir.join("other/gen")).unwrap();
+        fs::write(dir.join("src/x.ts"), "").unwrap();
+        fs::write(dir.join("other/gen/x.tsx"), "").unwrap();
+        let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
+        assert_eq!(
+            resolve_specifier_across(&dir.join("src/gen"), "./x", &roots, false, false),
+            Some("./x.js".to_string())
+        );
+    }
+
+    // Roots are matched against the normalized import target, so a "../" specifier crossing out
+    // of an overlapping root still maps into the other roots.
+    #[test]
+    fn resolve_specifier_parent_import_across_roots() {
+        let dir = test_dir("resolve_root_dirs_parent");
+        fs::create_dir_all(dir.join("src/gen")).unwrap();
+        fs::create_dir_all(dir.join("other")).unwrap();
+        fs::write(dir.join("other/x.tsx"), "").unwrap();
+        let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
+        assert_eq!(
+            resolve_specifier_across(&dir.join("src/gen"), "../x", &roots, false, false),
+            Some("../x.js".to_string())
+        );
+    }
+
+    // A directory whose index exists only as a declaration file resolves like tsc, assuming the
+    // JS implementation exists at runtime.
+    #[test]
+    fn resolve_specifier_resolves_declaration_index() {
+        let dir = test_dir("resolve_dts_index");
+        fs::create_dir_all(dir.join("gen")).unwrap();
+        fs::create_dir_all(dir.join("genm")).unwrap();
+        fs::write(dir.join("gen/index.d.ts"), "").unwrap();
+        fs::write(dir.join("genm/index.d.mts"), "").unwrap();
+        assert_eq!(
+            resolve_specifier(&dir, "./gen", false, false),
+            Some("./gen/index.js".to_string())
+        );
+        assert_eq!(
+            resolve_specifier(&dir, "./genm", false, false),
+            Some("./genm/index.mjs".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_specifier_outside_roots_unaffected() {
+        let dir = test_dir("resolve_root_dirs_outside");
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::create_dir_all(dir.join("other")).unwrap();
+        fs::write(dir.join("app/y.ts"), "").unwrap();
+        let roots = [dir.join("app"), dir.join("lib")];
+        assert_eq!(resolve_specifier_across(&dir.join("other"), "./y", &roots, false, false), None);
+    }
+
+    #[test]
+    fn resolve_specifier_resolves_sibling_declaration() {
+        let dir = test_dir("resolve_sibling_dts");
+        fs::write(dir.join("gen.d.ts"), "").unwrap();
+        fs::write(dir.join("genc.d.cts"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./gen", false, false), Some("./gen.js".to_string()));
+        assert_eq!(
+            resolve_specifier(&dir, "./genc", false, false),
+            Some("./genc.cjs".to_string())
+        );
+    }
+
+    #[test]
+    fn transpile_resolves_across_root_dirs() {
+        let dir = test_dir("transpile_root_dirs");
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("lib/shared.ts"), "").unwrap();
+        let options = Options {
+            emit_dts: false,
+            root_dirs: vec![dir.join("app"), dir.join("lib")],
+            ..default_options()
+        };
+        let src = dir.join("app/main.ts");
+        let result = transpile(
+            src.to_str().unwrap(),
+            "export * from \"./shared\";\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("export * from \"./shared.js\""), "js: {js}");
+    }
+
+    #[test]
+    fn run_requires_root_dirs_value() {
+        let err = run(args(&["--emit-js", "--root-dirs"])).unwrap_err();
+        assert_eq!(err, vec!["error: --root-dirs requires a path".to_string()]);
     }
 
     #[test]

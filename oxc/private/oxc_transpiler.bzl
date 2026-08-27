@@ -144,6 +144,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--rewrite-extensions")
         if ctx.attr.target:
             args.add("--target", ctx.attr.target)
+        if ctx.attr.module:
+            args.add("--module", ctx.attr.module)
         if ctx.attr.helpers_module:
             args.add("--helpers-module", ctx.attr.helpers_module)
     if emit_dts:
@@ -358,6 +360,21 @@ _oxc_transpiler_rule = rule(
                   "tsc's jsx value spellings to oxc's manually.",
             values = ["", "automatic", "classic"],
         ),
+        "module": attr.string(
+            doc = "Module format of the JS outputs, using oxc's module values. " +
+                  "\"preserve\" (default) keeps the input module syntax. " +
+                  "\"esm\" keeps ESM syntax and makes TypeScript's " +
+                  "CommonJS-specific syntax (`export =`, `import x = " +
+                  "require(...)`) an error; tsc spells this mode " +
+                  "es2015/esnext, so map your tsconfig module manually. " +
+                  "\"commonjs\" mirrors tsc's module=commonjs for that " +
+                  "CommonJS-specific syntax: `export =` becomes " +
+                  "`module.exports =`, `import x = require(...)` becomes a " +
+                  "require call, and a \"use strict\" directive is added. oxc " +
+                  "has no ESM-to-CommonJS transform, so ESM import/export " +
+                  "syntax in the sources is an error with \"commonjs\".",
+            values = ["", "preserve", "esm", "commonjs"],
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -389,6 +406,7 @@ def oxc_transpiler(
         target = "",
         helpers_module = "",
         jsx = "",
+        module = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -407,5 +425,6 @@ def oxc_transpiler(
         rewrite_extensions = rewrite_extensions or False,
         target = target or "",
         helpers_module = helpers_module or "",
+        module = module or "",
         **kwargs
     )

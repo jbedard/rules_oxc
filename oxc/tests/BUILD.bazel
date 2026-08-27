@@ -503,3 +503,37 @@ diff_test(
     file1 = "helperscustom/helpersfx/async.js",
     file2 = "snapshots/async_custom_helpers.js",
 )
+
+# module = "commonjs": TypeScript's CommonJS-specific syntax is rewritten (`export =` to
+# module.exports, `import x = require(...)` to a require call) and "use strict" is added. ESM
+# syntax in srcs would be an error: oxc has no ESM-to-CommonJS transform.
+oxc_transpiler(
+    name = "transpile_module_commonjs",
+    srcs = ["src/module_commonjs/api.cts"],
+    module = "commonjs",
+    out_dir = "cjs",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "module_commonjs_test",
+    file1 = "cjs/module_commonjs/api.cjs",
+    file2 = "snapshots/api.cjs",
+)
+
+# module = "esm": ESM syntax passes through unchanged (same output as "preserve" for ESM
+# sources); TypeScript's CommonJS-specific syntax would be an error instead of being rewritten.
+# tsc spells this mode es2015/esnext; the oxc value is used here.
+oxc_transpiler(
+    name = "transpile_module_esm",
+    srcs = ["src/main.ts"],
+    module = "esm",
+    out_dir = "esmout",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "module_esm_test",
+    file1 = "esmout/main.js",
+    file2 = "snapshots/main.js",
+)

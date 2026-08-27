@@ -5,13 +5,14 @@ use oxc::ast::ast::{
 use oxc::ast_visit::{Visit, walk};
 use oxc::syntax::scope::ScopeFlags;
 use oxc::codegen::{Codegen, CodegenOptions};
-use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource};
+use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource, OxcDiagnostic};
 use oxc::isolated_declarations::{
     IsolatedDeclarations, IsolatedDeclarationsOptions as OxcIsolatedDeclarationsOptions,
 };
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
-use oxc::span::SourceType;
+use oxc::span::{GetSpan, SourceType, Span};
+use oxc::syntax::module_record::ModuleRecord;
 use oxc::transformer::{
     CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime, Module,
     RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
@@ -28,6 +29,7 @@ enum JsxMode {
     Classic,
 }
 
+#[derive(Clone)]
 struct Options {
     emit_js: bool,
     emit_dts: bool,
@@ -55,6 +57,12 @@ struct Entry {
     dts_out: Option<String>,
 }
 
+struct Output {
+    path: String,
+    code: String,
+    map: Option<String>,
+}
+
 fn main() {
     if let Err(errors) = run(std::env::args().skip(1)) {
         for error in &errors {
@@ -62,6 +70,15 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+// The value following `flag`, or an error naming the flag when missing.
+fn flag_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+    what: &str,
+) -> Result<String, Vec<String>> {
+    args.next().ok_or_else(|| vec![format!("error: {flag} requires {what}")])
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
@@ -86,9 +103,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             "--emit-dts" => options.emit_dts = true,
             "--source-maps" => options.source_maps = true,
             "--jsx" => {
-                let value = args_iter
-                    .next()
-                    .ok_or_else(|| vec!["error: --jsx requires a value".to_string()])?;
+                let value = flag_value(&mut args_iter, &arg, "a value")?;
                 options.jsx = match value.as_str() {
                     "automatic" => JsxMode::Automatic,
                     "classic" => JsxMode::Classic,
@@ -101,25 +116,17 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             }
             "--rewrite-extensions" => options.rewrite_extensions = true,
             "--target" => {
-                let target = args_iter
-                    .next()
-                    .ok_or_else(|| vec!["error: --target requires a value".to_string()])?;
+                let target = flag_value(&mut args_iter, &arg, "a value")?;
                 options.env = Some(
                     EnvOptions::from_target(&target)
                         .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
                 );
             }
             "--helpers-module" => {
-                options.helpers_module = Some(
-                    args_iter
-                        .next()
-                        .ok_or_else(|| vec!["error: --helpers-module requires a value".to_string()])?,
-                );
+                options.helpers_module = Some(flag_value(&mut args_iter, &arg, "a value")?);
             }
             "--module" => {
-                let value = args_iter
-                    .next()
-                    .ok_or_else(|| vec!["error: --module requires a value".to_string()])?;
+                let value = flag_value(&mut args_iter, &arg, "a value")?;
                 options.module = match value.as_str() {
                     "preserve" => Module::Preserve,
                     "esm" => Module::Esm,
@@ -132,18 +139,10 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
                 };
             }
             "--root-dirs" => {
-                options.root_dirs.push(PathBuf::from(
-                    args_iter
-                        .next()
-                        .ok_or_else(|| vec!["error: --root-dirs requires a path".to_string()])?,
-                ));
+                options.root_dirs.push(PathBuf::from(flag_value(&mut args_iter, &arg, "a path")?));
             }
             "--manifest" => {
-                manifest_path = Some(
-                    args_iter
-                        .next()
-                        .ok_or_else(|| vec!["error: --manifest requires a file path".to_string()])?,
-                );
+                manifest_path = Some(flag_value(&mut args_iter, &arg, "a file path")?);
             }
             _ => positional.push(arg),
         }
@@ -194,7 +193,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         .collect();
 
     let mut all_errors: Vec<String> = Vec::new();
-    let mut outputs: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut outputs: Vec<Output> = Vec::new();
 
     for entry in &entries {
         let content = fs::read_to_string(&entry.src)
@@ -203,7 +202,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         // Declaration files pass through unchanged and have no JS output.
         if is_declaration_file(&entry.src) {
             if let Some(dts_out) = &entry.dts_out {
-                outputs.push((dts_out.clone(), content, None));
+                outputs.push(Output { path: dts_out.clone(), code: content, map: None });
             }
             continue;
         }
@@ -211,13 +210,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         let entry_options = Options {
             emit_js: entry.js_out.is_some(),
             emit_dts: entry.dts_out.is_some(),
-            source_maps: options.source_maps,
-            jsx: options.jsx,
-            rewrite_extensions: options.rewrite_extensions,
-            env: options.env.clone(),
-            helpers_module: options.helpers_module.clone(),
-            module: options.module,
-            root_dirs: options.root_dirs.clone(),
+            ..options.clone()
         };
         let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
@@ -225,10 +218,10 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             continue;
         }
         if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
-            outputs.push((js_out.clone(), code, result.js_map));
+            outputs.push(Output { path: js_out.clone(), code, map: result.js_map });
         }
         if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
-            outputs.push((dts_out.clone(), code, None));
+            outputs.push(Output { path: dts_out.clone(), code, map: None });
         }
     }
 
@@ -236,16 +229,16 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         return Err(all_errors);
     }
 
-    for (output_path, code, map) in outputs {
-        let out = Path::new(&output_path);
+    for output in outputs {
+        let out = Path::new(&output.path);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        if let Some(map) = map {
+        if let Some(map) = output.map {
             let map_basename = out.file_name().unwrap().to_string_lossy();
-            let code = format!("{code}\n//# sourceMappingURL={map_basename}.map");
+            let code = format!("{}\n//# sourceMappingURL={map_basename}.map", output.code);
             fs::write(out, code).unwrap();
-            fs::write(format!("{output_path}.map"), map).unwrap();
+            fs::write(format!("{}.map", output.path), map).unwrap();
         } else {
-            fs::write(out, code).unwrap();
+            fs::write(out, output.code).unwrap();
         }
     }
 
@@ -259,6 +252,7 @@ fn is_declaration_file(path: &str) -> bool {
     path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
+#[derive(Default)]
 struct TranspileResult {
     js_code: Option<String>,
     js_map: Option<String>,
@@ -266,7 +260,7 @@ struct TranspileResult {
     errors: Vec<String>,
 }
 
-fn transform_options(options: &Options) -> TransformOptions {
+fn build_transform_options(options: &Options) -> TransformOptions {
     TransformOptions {
         // With remove_class_fields_without_initializer below, matches tsc's useDefineForClassFields=false:
         // fields are assigned with `=` rather than Object.defineProperty, and fields without an
@@ -312,7 +306,7 @@ fn transform_options(options: &Options) -> TransformOptions {
 // Finds module-level await (await expressions and `for await` outside any function), which is
 // ESM-only syntax that oxc cannot rewrite for CommonJS.
 struct TopLevelAwaitFinder {
-    spans: Vec<oxc::span::Span>,
+    spans: Vec<Span>,
 }
 
 impl<'a> Visit<'a> for TopLevelAwaitFinder {
@@ -343,14 +337,42 @@ fn is_empty_export(stmt: &Statement) -> bool {
     }
 }
 
+// The transformer rewrites `export =`/`import x = require(...)` and erases type-only imports,
+// but oxc has no ESM-to-CommonJS transform: any module syntax still present cannot be emitted
+// as CommonJS. That includes `import.meta` (recorded in the module record) and top-level await
+// (found by an AST walk).
+fn commonjs_diagnostics(program: &Program, module_record: &ModuleRecord) -> Vec<OxcDiagnostic> {
+    let mut await_finder = TopLevelAwaitFinder { spans: Vec::new() };
+    await_finder.visit_program(program);
+    program
+        .body
+        .iter()
+        .filter(|stmt| stmt.is_module_declaration())
+        .map(|stmt| {
+            OxcDiagnostic::error(
+                "ESM import/export syntax cannot be emitted as CommonJS: \
+                 oxc only rewrites TypeScript `export =` and `import x = require(...)`",
+            )
+            .with_label(stmt.span())
+        })
+        .chain(module_record.import_metas.iter().map(|span| {
+            OxcDiagnostic::error("import.meta cannot be emitted as CommonJS").with_label(*span)
+        }))
+        .chain(await_finder.spans.iter().map(|span| {
+            OxcDiagnostic::error("top-level await cannot be emitted as CommonJS").with_label(*span)
+        }))
+        .collect()
+}
+
 fn render_errors(
     filename: &str,
     source_text: &str,
-    diagnostics: impl Iterator<Item = oxc::diagnostics::OxcDiagnostic>,
+    diagnostics: impl IntoIterator<Item = OxcDiagnostic>,
 ) -> Vec<String> {
     let handler = GraphicalReportHandler::new().with_theme(GraphicalTheme::none());
     let source = NamedSource::new(filename, source_text.to_string());
     diagnostics
+        .into_iter()
         .map(|diagnostic| {
             let diagnostic = diagnostic.with_source_code(source.clone());
             let mut s = String::new();
@@ -371,15 +393,10 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
     let allocator = Allocator::default();
     let mut parser_ret = Parser::new(&allocator, source_text, source_type).parse();
 
-    let mut result = TranspileResult {
-        js_code: None,
-        js_map: None,
-        dts_code: None,
-        errors: vec![],
-    };
+    let mut result = TranspileResult::default();
 
     if !parser_ret.diagnostics.is_empty() {
-        result.errors = render_errors(filename, source_text, parser_ret.diagnostics.into_iter());
+        result.errors = render_errors(filename, source_text, parser_ret.diagnostics);
         return result;
     }
 
@@ -393,7 +410,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         .build(&parser_ret.program);
 
         if !decl_ret.diagnostics.is_empty() {
-            result.errors = render_errors(filename, source_text, decl_ret.diagnostics.into_iter());
+            result.errors = render_errors(filename, source_text, decl_ret.diagnostics);
             return result;
         }
 
@@ -405,7 +422,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         let semantic_diagnostics = semantic_ret.diagnostics;
         let scoping = semantic_ret.semantic.into_scoping();
 
-        let transform_options = transform_options(options);
+        let transform_options = build_transform_options(options);
 
         let transformer_ret = Transformer::new(&allocator, Path::new(filename), &transform_options)
             .build_with_scoping(scoping, &mut parser_ret.program);
@@ -415,47 +432,18 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             .chain(transformer_ret.diagnostics)
             .collect();
         if !diagnostics.is_empty() {
-            result.errors = render_errors(filename, source_text, diagnostics.into_iter());
+            result.errors = render_errors(filename, source_text, diagnostics);
             return result;
         }
 
-        // The transformer rewrites `export =`/`import x = require(...)` and erases type-only imports,
-        // but oxc has no ESM-to-CommonJS transform: any module syntax still present cannot be emitted
-        // as CommonJS. That includes `import.meta` (recorded in the module record) and top-level await
-        // (found by an AST walk). An empty `export {}` — hand-written, or appended by the transformer
-        // after erasing a file's only module syntax — is dropped instead, matching tsc.
         if options.module.is_commonjs() {
-            use oxc::span::GetSpan;
+            // An empty `export {}` — hand-written, or appended by the transformer after erasing a
+            // file's only module syntax — is dropped rather than rejected, matching tsc.
             parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
-            let mut await_finder = TopLevelAwaitFinder { spans: Vec::new() };
-            await_finder.visit_program(&parser_ret.program);
-            let esm_diagnostics: Vec<_> = parser_ret
-                .program
-                .body
-                .iter()
-                .filter(|stmt| stmt.is_module_declaration())
-                .map(|stmt| {
-                    oxc::diagnostics::OxcDiagnostic::error(
-                        "ESM import/export syntax cannot be emitted as CommonJS: \
-                         oxc only rewrites TypeScript `export =` and `import x = require(...)`",
-                    )
-                    .with_label(stmt.span())
-                })
-                .chain(parser_ret.module_record.import_metas.iter().map(|span| {
-                    oxc::diagnostics::OxcDiagnostic::error(
-                        "import.meta cannot be emitted as CommonJS",
-                    )
-                    .with_label(*span)
-                }))
-                .chain(await_finder.spans.iter().map(|span| {
-                    oxc::diagnostics::OxcDiagnostic::error(
-                        "top-level await cannot be emitted as CommonJS",
-                    )
-                    .with_label(*span)
-                }))
-                .collect();
-            if !esm_diagnostics.is_empty() {
-                result.errors = render_errors(filename, source_text, esm_diagnostics.into_iter());
+            let diagnostics =
+                commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
+            if !diagnostics.is_empty() {
+                result.errors = render_errors(filename, source_text, diagnostics);
                 return result;
             }
         }
@@ -509,7 +497,7 @@ fn resolve_relative_specifiers<'a>(
 
         if let Some(source) = source
             && let Some(resolved) =
-                resolve_specifier_across(base_dir, source.value.as_str(), root_dirs)
+                resolve_specifier(base_dir, source.value.as_str(), root_dirs)
         {
             source.value = allocator.alloc_str(&resolved).into();
             source.raw = None;
@@ -576,15 +564,7 @@ fn candidate_targets(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) ->
     targets
 }
 
-fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
-    resolve_specifier_across(base_dir, specifier, &[])
-}
-
-fn resolve_specifier_across(
-    base_dir: &Path,
-    specifier: &str,
-    root_dirs: &[PathBuf],
-) -> Option<String> {
+fn resolve_specifier(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) -> Option<String> {
     if !specifier.starts_with("./") && !specifier.starts_with("../") {
         return None;
     }
@@ -594,33 +574,34 @@ fn resolve_specifier_across(
         return None;
     }
 
-    // Each candidate target is resolved completely (files, declarations, then index files) before moving
+    // Each candidate target is resolved completely (file, declaration, then index file) before moving
     // to the next, matching tsc: a directory's own index file wins over a file in a later root.
     for target in candidate_targets(base_dir, specifier, root_dirs) {
-        for ext in RESOLVABLE_EXTS {
-            if target.with_extension(ext).is_file() {
-                return Some(format!("{specifier}.{}", js_ext_for(ext)));
-            }
+        if let Some(js_ext) = probe(&target) {
+            return Some(format!("{specifier}.{js_ext}"));
         }
-
-        for (suffix, js_ext) in DECLARATION_SUFFIXES {
-            let mut decl = target.clone().into_os_string();
-            decl.push(suffix);
-            if Path::new(&decl).is_file() {
-                return Some(format!("{specifier}.{js_ext}"));
-            }
+        if let Some(js_ext) = probe(&target.join("index")) {
+            return Some(format!("{specifier}/index.{js_ext}"));
         }
+    }
 
-        for ext in RESOLVABLE_EXTS {
-            if target.join(format!("index.{ext}")).is_file() {
-                return Some(format!("{specifier}/index.{}", js_ext_for(ext)));
-            }
+    None
+}
+
+// The emitted JS extension for a source or declaration file existing at `target` with any
+// resolvable extension appended, or None when no such file exists.
+fn probe(target: &Path) -> Option<&'static str> {
+    for ext in RESOLVABLE_EXTS {
+        if target.with_extension(ext).is_file() {
+            return Some(js_ext_for(ext));
         }
+    }
 
-        for (suffix, js_ext) in DECLARATION_SUFFIXES {
-            if target.join(format!("index{suffix}")).is_file() {
-                return Some(format!("{specifier}/index.{js_ext}"));
-            }
+    for (suffix, js_ext) in DECLARATION_SUFFIXES {
+        let mut decl = target.to_path_buf().into_os_string();
+        decl.push(suffix);
+        if Path::new(&decl).is_file() {
+            return Some(js_ext);
         }
     }
 
@@ -645,47 +626,45 @@ mod tests {
         }
     }
 
+    fn js_options() -> Options {
+        Options { emit_dts: false, ..default_options() }
+    }
+
     fn target_options(target: &str) -> Options {
         Options {
-            emit_dts: false,
             env: Some(EnvOptions::from_target(target).unwrap()),
-            ..default_options()
+            ..js_options()
         }
     }
 
     fn commonjs_options() -> Options {
-        Options {
-            emit_dts: false,
-            module: Module::CommonJS,
-            ..default_options()
-        }
+        Options { module: Module::CommonJS, ..js_options() }
     }
 
     fn esm_options() -> Options {
-        Options {
-            emit_dts: false,
-            module: Module::Esm,
-            ..default_options()
-        }
+        Options { module: Module::Esm, ..js_options() }
+    }
+
+    // JS output of a successful transpile; panics with the rendered errors otherwise.
+    fn transpile_js(filename: &str, source_text: &str, options: &Options) -> String {
+        let result = transpile(filename, source_text, options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        result.js_code.unwrap()
     }
 
     #[test]
     fn target_downlevels_exponentiation() {
-        let result = transpile("a.ts", "export const x: number = 2 ** 10;\n", &target_options("es2015"));
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.ts", "export const x: number = 2 ** 10;\n", &target_options("es2015"));
         assert!(js.contains("Math.pow(2, 10)"), "js: {js}");
     }
 
     #[test]
     fn target_downlevels_optional_chaining() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export function f(o: { a?: { b?: number } }): number { return o.a?.b ?? 0; }\n",
             &target_options("es2019"),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(!js.contains("?."), "js: {js}");
         assert!(!js.contains("??"), "js: {js}");
     }
@@ -694,26 +673,18 @@ mod tests {
     // that package must be a runtime dependency when targets below es2017 are used with async code.
     #[test]
     fn target_downlevels_async_with_runtime_helper() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export async function f(): Promise<number> { return 1; }\n",
             &target_options("es2016"),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(!js.contains("async function f"), "js: {js}");
         assert!(js.contains("@oxc-project/runtime"), "js: {js}");
     }
 
     #[test]
     fn no_target_keeps_modern_syntax() {
-        let result = transpile(
-            "a.ts",
-            "export const x: number = 2 ** 10;\n",
-            &Options { emit_dts: false, ..default_options() },
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.ts", "export const x: number = 2 ** 10;\n", &js_options());
         assert!(js.contains("2 ** 10"), "js: {js}");
     }
 
@@ -733,34 +704,28 @@ mod tests {
     // downlevel async to es2016 so the transform pulls in the asyncToGenerator helper.
     fn helpers_options(helpers_module: Option<&str>) -> Options {
         Options {
-            emit_dts: false,
-            env: Some(EnvOptions::from_target("es2016").unwrap()),
             helpers_module: helpers_module.map(str::to_string),
-            ..default_options()
+            ..target_options("es2016")
         }
     }
 
     #[test]
     fn helpers_imported_from_default_module() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export async function f(): Promise<number> { return 1; }\n",
             &helpers_options(None),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("\"@oxc-project/runtime/helpers/asyncToGenerator\""), "js: {js}");
     }
 
     #[test]
     fn helpers_module_redirects_helper_imports() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export async function f(): Promise<number> { return 1; }\n",
             &helpers_options(Some("custom-helpers")),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("\"custom-helpers/helpers/asyncToGenerator\""), "js: {js}");
         assert!(!js.contains("@oxc-project/runtime"), "js: {js}");
     }
@@ -768,13 +733,10 @@ mod tests {
     #[test]
     fn helpers_module_leaves_helperless_output_unchanged() {
         let options = Options {
-            emit_dts: false,
             helpers_module: Some("custom-helpers".to_string()),
-            ..default_options()
+            ..js_options()
         };
-        let result = transpile("a.ts", "export const x: number = 1;\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.ts", "export const x: number = 1;\n", &options);
         assert!(!js.contains("custom-helpers"), "js: {js}");
     }
 
@@ -786,13 +748,11 @@ mod tests {
 
     #[test]
     fn esm_keeps_esm_syntax() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "import { helper } from \"./b.js\";\nexport const x: number = helper;\n",
             &esm_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("import { helper } from \"./b.js\""), "js: {js}");
         assert!(js.contains("export const x = helper"), "js: {js}");
         assert!(!js.contains("use strict"), "js: {js}");
@@ -829,39 +789,33 @@ mod tests {
 
     #[test]
     fn commonjs_transforms_export_assignment() {
-        let result = transpile(
+        let js = transpile_js(
             "a.cts",
             "const answer: number = 42;\nexport = { answer };\n",
             &commonjs_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("\"use strict\""), "js: {js}");
         assert!(js.contains("module.exports = { answer }"), "js: {js}");
     }
 
     #[test]
     fn commonjs_transforms_import_equals() {
-        let result = transpile(
+        let js = transpile_js(
             "a.cts",
             "import path = require(\"node:path\");\nexport = path.sep;\n",
             &commonjs_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("require(\"node:path\")"), "js: {js}");
         assert!(!js.contains("import "), "js: {js}");
     }
 
     #[test]
     fn commonjs_erases_type_only_imports() {
-        let result = transpile(
+        let js = transpile_js(
             "a.cts",
             "import type { Dirent } from \"node:fs\";\nexport = (d: Dirent): string => d.name;\n",
             &commonjs_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(!js.contains("node:fs"), "js: {js}");
         assert!(!js.contains("export {}"), "js: {js}");
     }
@@ -869,13 +823,11 @@ mod tests {
     // `export {}` only marks a file as a module; CommonJS output drops it.
     #[test]
     fn commonjs_drops_empty_export() {
-        let result = transpile(
+        let js = transpile_js(
             "a.cts",
             "const x: number = 1;\nexport = x;\nexport {};\n",
             &commonjs_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(!js.contains("export {}"), "js: {js}");
         assert!(js.contains("module.exports = x"), "js: {js}");
     }
@@ -962,14 +914,13 @@ mod tests {
     // Await inside a function is not top-level and stays valid in CommonJS.
     #[test]
     fn commonjs_allows_await_inside_functions() {
-        let result = transpile(
+        let js = transpile_js(
             "a.cts",
             "async function f(): Promise<number> { return await Promise.resolve(1); }\n\
              const g = async (): Promise<number> => await f();\nexport = g;\n",
             &commonjs_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert!(result.js_code.unwrap().contains("module.exports = g"));
+        assert!(js.contains("module.exports = g"));
     }
 
     // import.meta is an expression, not a module-declaration statement, so it is caught via the module
@@ -994,16 +945,7 @@ mod tests {
     // any module mode), ESM stays ESM, and no "use strict" is added.
     #[test]
     fn preserve_keeps_esm_and_omits_use_strict() {
-        let result = transpile(
-            "a.cts",
-            "export const x: number = 1;\n",
-            &Options {
-                emit_dts: false,
-                ..default_options()
-            },
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.cts", "export const x: number = 1;\n", &js_options());
         assert!(js.contains("export const x = 1"), "js: {js}");
         assert!(!js.contains("use strict"), "js: {js}");
     }
@@ -1034,13 +976,11 @@ mod tests {
 
     #[test]
     fn transpile_strips_types() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export const x: number = 1;\nexport interface I { a: string }\n",
             &default_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("export const x = 1"), "js: {js}");
         assert!(!js.contains("interface"), "js: {js}");
     }
@@ -1082,13 +1022,11 @@ mod tests {
 
     #[test]
     fn transpile_removes_class_fields_without_initializer() {
-        let result = transpile(
+        let js = transpile_js(
             "a.ts",
             "export class C { declared: number; assigned = 1; }\n",
             &default_options(),
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(!js.contains("declared"), "js: {js}");
         assert!(js.contains("assigned = 1"), "js: {js}");
     }
@@ -1107,11 +1045,7 @@ mod tests {
 
     #[test]
     fn transpile_plain_js() {
-        let options = Options {
-            emit_dts: false,
-            ..default_options()
-        };
-        let result = transpile("a.js", "export const x = 1;\n", &options);
+        let result = transpile("a.js", "export const x = 1;\n", &js_options());
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let js = result.js_code.unwrap();
         assert!(js.contains("export const x = 1"), "js: {js}");
@@ -1120,17 +1054,7 @@ mod tests {
 
     #[test]
     fn transpile_transforms_jsx() {
-        let options = Options {
-            emit_dts: false,
-            ..default_options()
-        };
-        let result = transpile(
-            "a.tsx",
-            "export const el: object = <div id={1} />;\n",
-            &options,
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.tsx", "export const el: object = <div id={1} />;\n", &js_options());
         assert!(js.contains("react/jsx-runtime"), "js: {js}");
         assert!(js.contains("_jsx("), "js: {js}");
         assert!(!js.contains(": object"), "js: {js}");
@@ -1138,13 +1062,7 @@ mod tests {
 
     #[test]
     fn transpile_transforms_jsx_in_plain_jsx_file() {
-        let options = Options {
-            emit_dts: false,
-            ..default_options()
-        };
-        let result = transpile("a.jsx", "export const el = <div id={1} />;\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js("a.jsx", "export const el = <div id={1} />;\n", &js_options());
         assert!(js.contains("_jsx("), "js: {js}");
     }
 
@@ -1152,18 +1070,8 @@ mod tests {
     // providing React is the caller's concern, as with tsc's jsx=react.
     #[test]
     fn jsx_classic_uses_create_element() {
-        let options = Options {
-            emit_dts: false,
-            jsx: JsxMode::Classic,
-            ..default_options()
-        };
-        let result = transpile(
-            "a.tsx",
-            "export const el: object = <div id={1} />;\n",
-            &options,
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let options = Options { jsx: JsxMode::Classic, ..js_options() };
+        let js = transpile_js("a.tsx", "export const el: object = <div id={1} />;\n", &options);
         assert!(js.contains("React.createElement"), "js: {js}");
         assert!(!js.contains("react/jsx-runtime"), "js: {js}");
         assert!(!js.contains("<div"), "js: {js}");
@@ -1195,9 +1103,9 @@ mod tests {
     #[test]
     fn resolve_specifier_ignores_bare_and_extensioned() {
         let dir = test_dir("resolve_ignores");
-        assert_eq!(resolve_specifier(&dir, "lodash"), None);
-        assert_eq!(resolve_specifier(&dir, "./b.js"), None);
-        assert_eq!(resolve_specifier(&dir, "./b.ts"), None);
+        assert_eq!(resolve_specifier(&dir, "lodash", &[]), None);
+        assert_eq!(resolve_specifier(&dir, "./b.js", &[]), None);
+        assert_eq!(resolve_specifier(&dir, "./b.ts", &[]), None);
     }
 
     #[test]
@@ -1207,11 +1115,11 @@ mod tests {
         fs::write(dir.join("c.mts"), "").unwrap();
         fs::write(dir.join("d.jsx"), "").unwrap();
         fs::write(dir.join("e.cjs"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./c"), Some("./c.mjs".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./d"), Some("./d.js".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./e"), Some("./e.cjs".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./missing"), None);
+        assert_eq!(resolve_specifier(&dir, "./b", &[]), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./c", &[]), Some("./c.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./d", &[]), Some("./d.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./e", &[]), Some("./e.cjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./missing", &[]), None);
     }
 
     #[test]
@@ -1219,7 +1127,7 @@ mod tests {
         let dir = test_dir("resolve_prefers_ts");
         fs::write(dir.join("b.mts"), "").unwrap();
         fs::write(dir.join("b.js"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./b", &[]), Some("./b.mjs".to_string()));
     }
 
     #[test]
@@ -1228,7 +1136,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/index.ts"), "").unwrap();
         assert_eq!(
-            resolve_specifier(&dir, "./sub"),
+            resolve_specifier(&dir, "./sub", &[]),
             Some("./sub/index.js".to_string())
         );
     }
@@ -1239,7 +1147,7 @@ mod tests {
         fs::write(dir.join("b.ts"), "").unwrap();
         fs::create_dir_all(dir.join("b")).unwrap();
         fs::write(dir.join("b/index.ts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./b", &[]), Some("./b.js".to_string()));
     }
 
     #[test]
@@ -1254,22 +1162,22 @@ mod tests {
         let roots = [dir.join("app"), dir.join("lib")];
         let base = dir.join("app");
         assert_eq!(
-            resolve_specifier_across(&base, "./shared", &roots),
+            resolve_specifier(&base, "./shared", &roots),
             Some("./shared.js".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./gen", &roots),
+            resolve_specifier(&base, "./gen", &roots),
             Some("./gen.js".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./genm", &roots),
+            resolve_specifier(&base, "./genm", &roots),
             Some("./genm.mjs".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./sub", &roots),
+            resolve_specifier(&base, "./sub", &roots),
             Some("./sub/index.js".to_string())
         );
-        assert_eq!(resolve_specifier_across(&base, "./missing", &roots), None);
+        assert_eq!(resolve_specifier(&base, "./missing", &roots), None);
     }
 
     #[test]
@@ -1280,7 +1188,7 @@ mod tests {
         fs::write(dir.join("lib/deep/util.ts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app/deep"), "./util", &roots),
+            resolve_specifier(&dir.join("app/deep"), "./util", &roots),
             Some("./util.js".to_string())
         );
     }
@@ -1294,7 +1202,7 @@ mod tests {
         fs::write(dir.join("lib/x.mts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app"), "./x", &roots),
+            resolve_specifier(&dir.join("app"), "./x", &roots),
             Some("./x.js".to_string())
         );
     }
@@ -1310,7 +1218,7 @@ mod tests {
         fs::write(dir.join("generated/x.mts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("generated")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app"), "./x", &roots),
+            resolve_specifier(&dir.join("app"), "./x", &roots),
             Some("./x/index.js".to_string())
         );
     }
@@ -1326,7 +1234,7 @@ mod tests {
         fs::write(dir.join("other/gen/x.tsx"), "").unwrap();
         let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("src/gen"), "./x", &roots),
+            resolve_specifier(&dir.join("src/gen"), "./x", &roots),
             Some("./x.js".to_string())
         );
     }
@@ -1341,7 +1249,7 @@ mod tests {
         fs::write(dir.join("other/x.tsx"), "").unwrap();
         let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("src/gen"), "../x", &roots),
+            resolve_specifier(&dir.join("src/gen"), "../x", &roots),
             Some("../x.js".to_string())
         );
     }
@@ -1356,11 +1264,11 @@ mod tests {
         fs::write(dir.join("gen/index.d.ts"), "").unwrap();
         fs::write(dir.join("genm/index.d.mts"), "").unwrap();
         assert_eq!(
-            resolve_specifier(&dir, "./gen"),
+            resolve_specifier(&dir, "./gen", &[]),
             Some("./gen/index.js".to_string())
         );
         assert_eq!(
-            resolve_specifier(&dir, "./genm"),
+            resolve_specifier(&dir, "./genm", &[]),
             Some("./genm/index.mjs".to_string())
         );
     }
@@ -1372,7 +1280,7 @@ mod tests {
         fs::create_dir_all(dir.join("other")).unwrap();
         fs::write(dir.join("app/y.ts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
-        assert_eq!(resolve_specifier_across(&dir.join("other"), "./y", &roots), None);
+        assert_eq!(resolve_specifier(&dir.join("other"), "./y", &roots), None);
     }
 
     #[test]
@@ -1380,9 +1288,9 @@ mod tests {
         let dir = test_dir("resolve_sibling_dts");
         fs::write(dir.join("gen.d.ts"), "").unwrap();
         fs::write(dir.join("genc.d.cts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./gen"), Some("./gen.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./gen", &[]), Some("./gen.js".to_string()));
         assert_eq!(
-            resolve_specifier(&dir, "./genc"),
+            resolve_specifier(&dir, "./genc", &[]),
             Some("./genc.cjs".to_string())
         );
     }
@@ -1394,18 +1302,11 @@ mod tests {
         fs::create_dir_all(dir.join("lib")).unwrap();
         fs::write(dir.join("lib/shared.ts"), "").unwrap();
         let options = Options {
-            emit_dts: false,
             root_dirs: vec![dir.join("app"), dir.join("lib")],
-            ..default_options()
+            ..js_options()
         };
         let src = dir.join("app/main.ts");
-        let result = transpile(
-            src.to_str().unwrap(),
-            "export * from \"./shared\";\n",
-            &options,
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js(src.to_str().unwrap(), "export * from \"./shared\";\n", &options);
         assert!(js.contains("export * from \"./shared.js\""), "js: {js}");
     }
 
@@ -1419,33 +1320,21 @@ mod tests {
     fn transpile_resolves_export_all_specifier() {
         let dir = test_dir("transpile_export_all");
         fs::write(dir.join("b.ts"), "").unwrap();
-        let options = Options {
-            emit_dts: false,
-            ..default_options()
-        };
         let src = dir.join("a.ts");
-        let result = transpile(src.to_str().unwrap(), "export * from \"./b\";\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
+        let js = transpile_js(src.to_str().unwrap(), "export * from \"./b\";\n", &js_options());
         assert!(js.contains("export * from \"./b.js\""), "js: {js}");
     }
 
     #[test]
     fn transpile_rewrites_dynamic_import_extension() {
         let dir = test_dir("transpile_dynamic_import_rewrite");
-        let options = Options {
-            emit_dts: false,
-            rewrite_extensions: true,
-            ..default_options()
-        };
+        let options = Options { rewrite_extensions: true, ..js_options() };
         let src = dir.join("a.ts");
-        let result = transpile(
+        let js = transpile_js(
             src.to_str().unwrap(),
             "export const p = import(\"./b.ts\");\nexport async function f() { return await import(\"./c.mts\"); }\n",
             &options,
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("import(\"./b.js\")"), "js: {js}");
         assert!(js.contains("import(\"./c.mjs\")"), "js: {js}");
     }
@@ -1457,19 +1346,9 @@ mod tests {
         let dir = test_dir("transpile_dynamic_import_extensionless");
         fs::write(dir.join("b.ts"), "").unwrap();
         for rewrite_extensions in [false, true] {
-            let options = Options {
-                emit_dts: false,
-                rewrite_extensions,
-                ..default_options()
-            };
+            let options = Options { rewrite_extensions, ..js_options() };
             let src = dir.join("a.ts");
-            let result = transpile(
-                src.to_str().unwrap(),
-                "export const p = import(\"./b\");\n",
-                &options,
-            );
-            assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-            let js = result.js_code.unwrap();
+            let js = transpile_js(src.to_str().unwrap(), "export const p = import(\"./b\");\n", &options);
             assert!(js.contains("import(\"./b\")"), "js: {js}");
         }
     }
@@ -1477,36 +1356,24 @@ mod tests {
     #[test]
     fn transpile_leaves_non_literal_dynamic_import() {
         let dir = test_dir("transpile_dynamic_import_non_literal");
-        let options = Options {
-            emit_dts: false,
-            rewrite_extensions: true,
-            ..default_options()
-        };
+        let options = Options { rewrite_extensions: true, ..js_options() };
         let src = dir.join("a.ts");
-        let result = transpile(
+        let js = transpile_js(
             src.to_str().unwrap(),
             "export function f(name: string) { return import(name); }\n",
             &options,
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("import(name)"), "js: {js}");
     }
 
     #[test]
     fn transpile_rewrites_static_import_extensions() {
-        let options = Options {
-            emit_dts: false,
-            rewrite_extensions: true,
-            ..default_options()
-        };
-        let result = transpile(
+        let options = Options { rewrite_extensions: true, ..js_options() };
+        let js = transpile_js(
             "a.ts",
             "export { b } from \"./b.ts\";\nexport { c } from \"../c.cts\";\nexport { d } from \"./d.js\";\n",
             &options,
         );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let js = result.js_code.unwrap();
         assert!(js.contains("\"./b.js\""), "js: {js}");
         assert!(js.contains("\"../c.cjs\""), "js: {js}");
         assert!(js.contains("\"./d.js\""), "js: {js}");
@@ -1514,26 +1381,16 @@ mod tests {
 
     #[test]
     fn transpile_leaves_ts_extension_when_rewrite_disabled() {
-        let options = Options {
-            emit_dts: false,
-            ..default_options()
-        };
-        let result = transpile("a.ts", "export { b } from \"./b.ts\";\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert!(result.js_code.unwrap().contains("\"./b.ts\""));
+        let js = transpile_js("a.ts", "export { b } from \"./b.ts\";\n", &js_options());
+        assert!(js.contains("\"./b.ts\""));
     }
 
     // oxc rewrites any slash-containing specifier, bare package paths included, unlike tsc.
     #[test]
     fn transpile_rewrites_bare_specifier_with_slash() {
-        let options = Options {
-            emit_dts: false,
-            rewrite_extensions: true,
-            ..default_options()
-        };
-        let result = transpile("a.ts", "export { x } from \"pkg/x.ts\";\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert!(result.js_code.unwrap().contains("\"pkg/x.js\""));
+        let options = Options { rewrite_extensions: true, ..js_options() };
+        let js = transpile_js("a.ts", "export { x } from \"pkg/x.ts\";\n", &options);
+        assert!(js.contains("\"pkg/x.js\""));
     }
 
 

@@ -300,3 +300,91 @@ diff_test(
     file1 = "dtsonly/main.d.ts",
     file2 = "snapshots/main.d.ts",
 )
+
+# declaration_dir: declarations are written to their own directory, like tsc's declarationDir,
+# while JS outputs stay in out_dir.
+oxc_transpiler(
+    name = "transpile_declaration_dir",
+    srcs = [
+        "src/main.ts",
+        "src/util.mts",
+    ],
+    declaration_dir = "ddir/types",
+    emit_dts = True,
+    out_dir = "ddir/code",
+    root_dir = "src",
+)
+
+build_test(
+    name = "declaration_dir_outputs_test",
+    targets = [
+        "ddir/code/main.js",
+        "ddir/code/util.mjs",
+        "ddir/types/main.d.ts",
+        "ddir/types/util.d.mts",
+    ],
+)
+
+diff_test(
+    name = "js_declaration_dir_test",
+    file1 = "ddir/code/main.js",
+    file2 = "snapshots/main.js",
+)
+
+diff_test(
+    name = "dts_declaration_dir_test",
+    file1 = "ddir/types/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)
+
+diff_test(
+    name = "dts_declaration_dir_mts_test",
+    file1 = "ddir/types/util.d.mts",
+    file2 = "snapshots/util.d.mts",
+)
+
+# declaration_dir without out_dir: JS lands at the package root (root_dir stripped), declarations
+# under declaration_dir.
+oxc_transpiler(
+    name = "transpile_declaration_dir_only",
+    srcs = ["src/util.mts"],
+    declaration_dir = "ddtypes",
+    emit_dts = True,
+    root_dir = "src",
+)
+
+build_test(
+    name = "declaration_dir_only_outputs_test",
+    targets = [
+        "util.mjs",
+        "ddtypes/util.d.mts",
+    ],
+)
+
+diff_test(
+    name = "js_declaration_dir_only_test",
+    file1 = "util.mjs",
+    file2 = "snapshots/util.mjs",
+)
+
+diff_test(
+    name = "dts_declaration_dir_only_test",
+    file1 = "ddtypes/util.d.mts",
+    file2 = "snapshots/util.d.mts",
+)
+
+# declaration_dir with emit_js = False: only the declarations, in their own directory.
+oxc_transpiler(
+    name = "transpile_declaration_dir_dts_only",
+    srcs = ["src/main.ts"],
+    declaration_dir = "onlytypes",
+    emit_dts = True,
+    emit_js = False,
+    root_dir = "src",
+)
+
+diff_test(
+    name = "dts_declaration_dir_dts_only_test",
+    file1 = "onlytypes/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)

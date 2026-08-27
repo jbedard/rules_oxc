@@ -63,7 +63,7 @@ def _to_js_out(src, out_dir, root_dir):
         )
     return out
 
-def _to_dts_out(src, out_dir, root_dir):
+def _to_dts_out(src, declaration_dir, root_dir):
     """Return the declaration output path for a source path, or None to skip it."""
     path = src[src.find(":") + 1:]
 
@@ -78,7 +78,7 @@ def _to_dts_out(src, out_dir, root_dir):
         return None
 
     out_ext = _DTS_EXT_MAP.get(src_ext, ".d.ts")
-    return _out_path(path[:ext_idx] + out_ext, out_dir, root_dir)
+    return _out_path(path[:ext_idx] + out_ext, declaration_dir, root_dir)
 
 def _to_json_out(src, out_dir, root_dir):
     """Return the output path for a `.json` source, or None to skip it."""
@@ -161,6 +161,11 @@ def _oxc_transpiler_impl(ctx):
     if ctx.attr.out_dir != "" and ctx.attr.root_dir == "":
         fail("When out_dir is set, root_dir must also be set.")
 
+    if ctx.attr.declaration_dir != "" and ctx.attr.root_dir == "":
+        fail("When declaration_dir is set, root_dir must also be set.")
+
+    declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
+
     root_dir = ctx.attr.root_dir.removesuffix("/")
     if root_dir == ".":
         root_dir = ""
@@ -222,7 +227,7 @@ def _oxc_transpiler_impl(ctx):
                 transpile_dts_outs.append(None)
             else:
                 out_path = src_path[:ext_idx] + _DTS_EXT_MAP.get(src_ext, ".d.ts")
-                out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
+                out_path = lib.to_out_path(out_path, declaration_dir, ctx.attr.root_dir)
                 out = _declare(ctx, predeclared, out_path)
                 dts_outs.append(out)
                 transpile_dts_outs.append(out)
@@ -287,6 +292,10 @@ _oxc_transpiler_rule = rule(
         "dts_outs": attr.output_list(),
         "json_outs": attr.output_list(),
         "out_dir": attr.string(),
+        "declaration_dir": attr.string(
+            doc = "Directory for the .d.ts outputs, like tsc's declarationDir. " +
+                  "Defaults to out_dir.",
+        ),
         "root_dir": attr.string(),
         "emit_js": attr.bool(
             default = True,
@@ -322,6 +331,7 @@ def oxc_transpiler(
         name,
         srcs,
         out_dir = "",
+        declaration_dir = "",
         root_dir = "",
         emit_js = True,
         emit_dts = False,
@@ -333,9 +343,10 @@ def oxc_transpiler(
         name = name,
         srcs = srcs,
         js_outs = _calculate_outs(srcs, _to_js_out, out_dir or "", root_dir or "") if emit_js else [],
-        dts_outs = _calculate_outs(srcs, _to_dts_out, out_dir or "", root_dir or "") if emit_dts else [],
+        dts_outs = _calculate_outs(srcs, _to_dts_out, declaration_dir or out_dir or "", root_dir or "") if emit_dts else [],
         json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js else [],
         out_dir = out_dir or "",
+        declaration_dir = declaration_dir or "",
         root_dir = root_dir or "",
         emit_js = emit_js,
         emit_dts = emit_dts,

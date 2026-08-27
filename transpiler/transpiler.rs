@@ -53,6 +53,10 @@ struct Options {
     // jsxFactory/jsxFragmentFactory. Default to React.createElement and React.Fragment.
     jsx_pragma: Option<String>,
     jsx_pragma_frag: Option<String>,
+    // tsc's useDefineForClassFields. false (the default, matching swc) maps to oxc's
+    // set_public_class_fields assumption plus remove_class_fields_without_initializer; true keeps
+    // define semantics, tsc's own default for target >= es2022.
+    use_define_for_class_fields: bool,
 }
 
 struct Entry {
@@ -114,6 +118,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             jsx_import_source: None,
             jsx_pragma: None,
             jsx_pragma_frag: None,
+            use_define_for_class_fields: false,
         },
         manifest_path: None,
         positional: Vec::new(),
@@ -155,6 +160,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 );
             }
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
+            "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
             "--target" => {
                 let target = flag_value(&mut args, &arg, "a value")?;
                 cli.options.env = Some(
@@ -331,16 +337,17 @@ struct TranspileResult {
 
 fn build_transform_options(options: &Options) -> TransformOptions {
     TransformOptions {
-        // With remove_class_fields_without_initializer below, matches tsc's useDefineForClassFields=false:
+        // Without --use-define-for-class-fields, matches tsc's useDefineForClassFields=false:
         // fields are assigned with `=` rather than Object.defineProperty, and fields without an
-        // initializer are removed rather than set to undefined.
+        // initializer are removed rather than set to undefined. With the flag, define semantics
+        // are kept (tsc's own default for target >= es2022).
         assumptions: CompilerAssumptions {
-            set_public_class_fields: true,
+            set_public_class_fields: !options.use_define_for_class_fields,
             ..Default::default()
         },
         typescript: {
             let mut typescript = TypeScriptOptions {
-                remove_class_fields_without_initializer: true,
+                remove_class_fields_without_initializer: !options.use_define_for_class_fields,
                 // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any
                 // slash-containing .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always
                 // maps to .js (never .jsx).
@@ -625,6 +632,7 @@ mod tests {
             jsx_import_source: None,
             jsx_pragma: None,
             jsx_pragma_frag: None,
+            use_define_for_class_fields: false,
         }
     }
 
@@ -1018,6 +1026,26 @@ mod tests {
             &default_options(),
         );
         assert!(!js.contains("declared"), "js: {js}");
+        assert!(js.contains("assigned = 1"), "js: {js}");
+    }
+
+    // With --use-define-for-class-fields, fields keep define semantics: uninitialized fields
+    // remain as field definitions instead of being removed.
+    #[test]
+    fn use_define_for_class_fields_keeps_field_definitions() {
+        let options = Options {
+            emit_dts: false,
+            use_define_for_class_fields: true,
+            ..default_options()
+        };
+        let result = transpile(
+            "a.ts",
+            "export class C { declared: number; assigned = 1; }\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("declared"), "js: {js}");
         assert!(js.contains("assigned = 1"), "js: {js}");
     }
 

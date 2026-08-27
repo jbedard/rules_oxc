@@ -10,7 +10,7 @@ use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
 use oxc::transformer::{
-    CompilerAssumptions, JsxOptions, TransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, EnvOptions, JsxOptions, TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ struct Options {
     source_maps: bool,
     preserve_jsx: bool,
     rewrite_extensions: bool,
+    // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's
+    // `target`. None leaves syntax at the latest ES version.
+    env: Option<EnvOptions>,
 }
 
 struct Entry {
@@ -45,6 +48,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         source_maps: false,
         preserve_jsx: false,
         rewrite_extensions: false,
+        env: None,
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -57,6 +61,15 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             "--source-maps" => options.source_maps = true,
             "--preserve-jsx" => options.preserve_jsx = true,
             "--rewrite-extensions" => options.rewrite_extensions = true,
+            "--target" => {
+                let target = args_iter
+                    .next()
+                    .ok_or_else(|| vec!["error: --target requires a value".to_string()])?;
+                options.env = Some(
+                    EnvOptions::from_target(&target)
+                        .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
+                );
+            }
             "--manifest" => {
                 manifest_path = Some(
                     args_iter
@@ -134,6 +147,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             source_maps: options.source_maps,
             preserve_jsx: options.preserve_jsx,
             rewrite_extensions: options.rewrite_extensions,
+            env: options.env.clone(),
         };
         let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
@@ -253,6 +267,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             } else {
                 JsxOptions::default()
             },
+            env: options.env.clone().unwrap_or_default(),
             ..Default::default()
         };
 
@@ -459,7 +474,77 @@ mod tests {
             source_maps: false,
             preserve_jsx: false,
             rewrite_extensions: false,
+            env: None,
         }
+    }
+
+    fn target_options(target: &str) -> Options {
+        Options {
+            emit_dts: false,
+            env: Some(EnvOptions::from_target(target).unwrap()),
+            ..default_options()
+        }
+    }
+
+    #[test]
+    fn target_downlevels_exponentiation() {
+        let result = transpile("a.ts", "export const x: number = 2 ** 10;\n", &target_options("es2015"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("Math.pow(2, 10)"), "js: {js}");
+    }
+
+    #[test]
+    fn target_downlevels_optional_chaining() {
+        let result = transpile(
+            "a.ts",
+            "export function f(o: { a?: { b?: number } }): number { return o.a?.b ?? 0; }\n",
+            &target_options("es2019"),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("?."), "js: {js}");
+        assert!(!js.contains("??"), "js: {js}");
+    }
+
+    // Downleveled async functions need the asyncToGenerator helper, which the
+    // transformer imports from @oxc-project/runtime: that package must be a
+    // runtime dependency when targets below es2017 are used with async code.
+    #[test]
+    fn target_downlevels_async_with_runtime_helper() {
+        let result = transpile(
+            "a.ts",
+            "export async function f(): Promise<number> { return 1; }\n",
+            &target_options("es2016"),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("async function f"), "js: {js}");
+        assert!(js.contains("@oxc-project/runtime"), "js: {js}");
+    }
+
+    #[test]
+    fn no_target_keeps_modern_syntax() {
+        let result = transpile(
+            "a.ts",
+            "export const x: number = 2 ** 10;\n",
+            &Options { emit_dts: false, ..default_options() },
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("2 ** 10"), "js: {js}");
+    }
+
+    #[test]
+    fn run_reports_invalid_target() {
+        let err = run(args(&["--emit-js", "--target", "es1999"])).unwrap_err();
+        assert!(err[0].starts_with("error: invalid --target \"es1999\""), "{err:?}");
+    }
+
+    #[test]
+    fn run_requires_target_value() {
+        let err = run(args(&["--emit-js", "--target"])).unwrap_err();
+        assert_eq!(err, vec!["error: --target requires a value".to_string()]);
     }
 
     #[test]

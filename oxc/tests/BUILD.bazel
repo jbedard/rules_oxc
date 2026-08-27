@@ -421,3 +421,69 @@ diff_test(
     file1 = "targetes2019/modern.js",
     file2 = "snapshots/modern_es2019.js",
 )
+
+# helpers_module unset: no --helpers-module is passed, deferring the default entirely to the
+# tool (oxc's @oxc-project/runtime); the emitted module name is covered by the transpiler's
+# helpers_imported_from_default_module unit test, since no transform in the rule's default
+# configuration needs a helper.
+oxc_transpiler(
+    name = "transpile_helpers_default",
+    srcs = ["src/main.ts"],
+    out_dir = "helpersdefault",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "helpers_default_test",
+    file1 = "helpersdefault/main.js",
+    file2 = "snapshots/main.js",
+)
+
+# helpers_module set but unused: with no helper-requiring transform the redirected module leaves
+# no trace, so the output is byte-identical to the plain snapshot ("custom-helpers" appears
+# nowhere). The redirect itself is covered by the transpiler's unit tests.
+oxc_transpiler(
+    name = "transpile_helpers_module_unused",
+    srcs = ["src/main.ts"],
+    helpers_module = "custom-helpers",
+    out_dir = "helpers",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "helpers_module_unused_test",
+    file1 = "helpers/main.js",
+    file2 = "snapshots/main.js",
+)
+
+# Downleveling async below es2017 needs the asyncToGenerator helper: with helpers_module unset
+# it is imported from the tool's default, @oxc-project/runtime.
+oxc_transpiler(
+    name = "transpile_helpers_default_downlevel",
+    srcs = ["src/helpersfx/async.ts"],
+    out_dir = "helpersdl",
+    root_dir = "src",
+    target = "es2016",
+)
+
+diff_test(
+    name = "helpers_default_downlevel_test",
+    file1 = "helpersdl/helpersfx/async.js",
+    file2 = "snapshots/async_default_helpers.js",
+)
+
+# The same helper import, redirected by helpers_module.
+oxc_transpiler(
+    name = "transpile_helpers_module_downlevel",
+    srcs = ["src/helpersfx/async.ts"],
+    helpers_module = "custom-helpers",
+    out_dir = "helperscustom",
+    root_dir = "src",
+    target = "es2016",
+)
+
+diff_test(
+    name = "helpers_module_downlevel_test",
+    file1 = "helperscustom/helpersfx/async.js",
+    file2 = "snapshots/async_custom_helpers.js",
+)

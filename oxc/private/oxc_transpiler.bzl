@@ -142,6 +142,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--rewrite-extensions")
         if ctx.attr.target:
             args.add("--target", ctx.attr.target)
+        if ctx.attr.helpers_module:
+            args.add("--helpers-module", ctx.attr.helpers_module)
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
@@ -337,6 +339,15 @@ _oxc_transpiler_rule = rule(
                 "esnext",
             ],
         ),
+        "helpers_module": attr.string(
+            doc = "Module to import runtime helpers from, defaulting to " +
+                  "@oxc-project/runtime. Transforms that need a helper always " +
+                  "import it, like tsc's importHelpers; oxc has no inline " +
+                  "helper mode, so tsc's default importHelpers=false behavior " +
+                  "cannot be reproduced. The helpers module must be a runtime " +
+                  "dependency whenever a transform emits helper imports (none " +
+                  "do in the default configuration).",
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -366,6 +377,7 @@ def oxc_transpiler(
         source_maps = False,
         rewrite_extensions = False,
         target = "",
+        helpers_module = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -382,5 +394,6 @@ def oxc_transpiler(
         source_maps = source_maps or False,
         rewrite_extensions = rewrite_extensions or False,
         target = target or "",
+        helpers_module = helpers_module or "",
         **kwargs
     )

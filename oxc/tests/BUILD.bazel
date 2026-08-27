@@ -4,14 +4,19 @@ load("//oxc:defs.bzl", "oxc_transpiler")
 
 package(default_testonly = True)
 
+# The "src/*.ts" glob also matches src/types.d.ts: declaration sources are
+# skipped by the rule and must not break the build or produce outputs.
 oxc_transpiler(
     name = "transpile",
     srcs = glob([
         "src/*.ts",
         "src/*.tsx",
         "src/*.mts",
+        "src/*.cts",
         "src/*.js",
         "src/*.jsx",
+        "src/*.json",
+        "src/sub/*.ts",
     ]),
     emit_dts = True,
     out_dir = "dist",
@@ -31,7 +36,38 @@ build_test(
         "dist/component.js",
         "dist/component.d.ts",
         "dist/widget.js",
+        "dist/mod.cjs",
+        "dist/mod.d.cts",
+        "dist/data.json",
+        "dist/sub/index.js",
+        "dist/uses_index.js",
     ],
+)
+
+# JSON sources are copied through unchanged.
+diff_test(
+    name = "json_test",
+    file1 = "dist/data.json",
+    file2 = "src/data.json",
+)
+
+diff_test(
+    name = "js_mod_test",
+    file1 = "dist/mod.cjs",
+    file2 = "snapshots/mod.cjs",
+)
+
+diff_test(
+    name = "dts_mod_test",
+    file1 = "dist/mod.d.cts",
+    file2 = "snapshots/mod.d.cts",
+)
+
+# Extensionless import of a directory resolves to its index file.
+diff_test(
+    name = "js_uses_index_test",
+    file1 = "dist/uses_index.js",
+    file2 = "snapshots/uses_index.js",
 )
 
 diff_test(
@@ -145,4 +181,146 @@ diff_test(
     name = "rewrite_extensions_on_test",
     file1 = "rewrite_on/rewrite_extensions/main.js",
     file2 = "snapshots/main_extensions_on.js",
+)
+
+# rewrite_extensions combined with preserve_jsx: ".tsx" specifiers are
+# rewritten to the ".jsx" extension that preserve_jsx outputs use.
+oxc_transpiler(
+    name = "transpile_rewrite_extensions_preserve_jsx",
+    srcs = _REWRITE_EXTENSIONS_SRCS,
+    out_dir = "rewrite_preserve",
+    preserve_jsx = True,
+    rewrite_extensions = True,
+    root_dir = "src",
+)
+
+diff_test(
+    name = "rewrite_extensions_preserve_jsx_test",
+    file1 = "rewrite_preserve/rewrite_extensions/main.js",
+    file2 = "snapshots/main_extensions_preserve_jsx.js",
+)
+
+# source_maps: each JS output gains a sourceMappingURL comment and a sibling
+# .js.map file. The .map is declared as an action output, so building the
+# target fails if it is not written.
+oxc_transpiler(
+    name = "transpile_source_maps",
+    srcs = ["src/main.ts"],
+    out_dir = "maps",
+    root_dir = "src",
+    source_maps = True,
+)
+
+build_test(
+    name = "source_maps_test",
+    targets = [":transpile_source_maps"],
+)
+
+diff_test(
+    name = "js_source_maps_test",
+    file1 = "maps/main.js",
+    file2 = "snapshots/main_with_map.js",
+)
+
+# No out_dir/root_dir: outputs land next to their sources. Plain JS sources
+# (e.g. src/legacy.js) can't be used here as output would equal input, but
+# .jsx works since the JSX transform emits .js.
+oxc_transpiler(
+    name = "transpile_in_place",
+    srcs = [
+        "src/component.tsx",
+        "src/main.ts",
+        "src/util.mts",
+        "src/widget.jsx",
+    ],
+    emit_dts = True,
+)
+
+build_test(
+    name = "in_place_outputs_test",
+    targets = [
+        "src/main.js",
+        "src/main.d.ts",
+        "src/util.mjs",
+        "src/util.d.mts",
+        "src/component.js",
+        "src/component.d.ts",
+        "src/widget.js",
+    ],
+)
+
+diff_test(
+    name = "js_in_place_test",
+    file1 = "src/main.js",
+    file2 = "snapshots/main.js",
+)
+
+diff_test(
+    name = "dts_in_place_test",
+    file1 = "src/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)
+
+diff_test(
+    name = "js_widget_in_place_test",
+    file1 = "src/widget.js",
+    file2 = "snapshots/widget.js",
+)
+
+# preserve_jsx in place: .tsx emits .jsx, so outputs don't collide with
+# inputs. .jsx sources would collide (output ext is also .jsx).
+oxc_transpiler(
+    name = "transpile_preserve_jsx_in_place",
+    srcs = ["src/component.tsx"],
+    preserve_jsx = True,
+)
+
+diff_test(
+    name = "preserve_jsx_in_place_test",
+    file1 = "src/component.jsx",
+    file2 = "snapshots/component.jsx",
+)
+
+# root_dir without out_dir: outputs land at the package root.
+oxc_transpiler(
+    name = "transpile_root_dir_only",
+    srcs = ["src/main.ts"],
+    emit_dts = True,
+    root_dir = "src",
+)
+
+build_test(
+    name = "root_dir_only_outputs_test",
+    targets = [
+        "main.js",
+        "main.d.ts",
+    ],
+)
+
+diff_test(
+    name = "js_root_dir_only_test",
+    file1 = "main.js",
+    file2 = "snapshots/main.js",
+)
+
+# emit_js = False: only declarations are emitted, and DefaultInfo falls back
+# to the types when there are no JS outputs.
+oxc_transpiler(
+    name = "transpile_dts_only",
+    srcs = ["src/main.ts"],
+    emit_dts = True,
+    emit_js = False,
+    out_dir = "dtsonly",
+    root_dir = "src",
+)
+
+build_test(
+    name = "dts_only_test",
+    targets = [":transpile_dts_only"],
+)
+
+diff_test(
+    name = "dts_only_main_test",
+    file1 = "dtsonly/main.d.ts",
+    file2 = "snapshots/main.d.ts",
 )

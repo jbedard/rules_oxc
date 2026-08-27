@@ -1,9 +1,8 @@
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    ArrowFunctionExpression, AwaitExpression, Expression, ForOfStatement, Function,
-    ImportExpression, Program, Statement, StringLiteral,
+    ArrowFunctionExpression, AwaitExpression, ForOfStatement, Function, Program, Statement,
 };
-use oxc::ast_visit::{Visit, VisitMut, walk, walk_mut};
+use oxc::ast_visit::{Visit, walk};
 use oxc::syntax::scope::ScopeFlags;
 use oxc::codegen::{Codegen, CodegenOptions};
 use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource};
@@ -15,7 +14,7 @@ use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
 use oxc::transformer::{
     CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime, Module,
-    TransformOptions, Transformer, TypeScriptOptions,
+    RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -276,6 +275,11 @@ fn transform_options(options: &Options) -> TransformOptions {
         },
         typescript: TypeScriptOptions {
             remove_class_fields_without_initializer: true,
+            // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any slash-containing
+            // .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always maps to .js (never .jsx).
+            rewrite_import_extensions: options
+                .rewrite_extensions
+                .then_some(RewriteExtensionsMode::Rewrite),
             ..Default::default()
         },
         jsx: match options.jsx {
@@ -460,10 +464,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             &mut parser_ret.program,
             &allocator,
             Path::new(filename),
-            !parser_ret.module_record.dynamic_imports.is_empty(),
             &options.root_dirs,
-            options.jsx == JsxMode::Preserve,
-            options.rewrite_extensions,
         );
 
         let mut codegen = Codegen::new();
@@ -489,29 +490,17 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
 // mirroring what swc's `module.resolveFully` option already does for the swc
 // transpiler path.
 //
-// Separately, sources may already write a fully-specified TypeScript
-// extension (e.g. "./foo.ts"), relying on tsc's `rewriteRelativeImportExtensions`
-// to rewrite it to the emitted JS extension. When `rewrite_extensions` is set
-// we mirror that rewrite too, so this transpiler is a drop-in replacement for
-// swc's equivalent `jsc.rewriteRelativeImportExtensions` config.
+// Extensioned specifiers are left alone: rewriting TypeScript extensions is handled by the
+// transformer's `rewrite_import_extensions` option. Static imports are top-level only, so no
+// full AST walk is needed.
 fn resolve_relative_specifiers<'a>(
     program: &mut Program<'a>,
     allocator: &'a Allocator,
     filename: &Path,
-    has_dynamic_imports: bool,
     root_dirs: &[PathBuf],
-    preserve_jsx: bool,
-    rewrite_extensions: bool,
 ) {
     let base_dir = filename.parent().unwrap_or_else(|| Path::new(""));
 
-    let mut rewriter = SpecifierRewriter {
-        allocator,
-        base_dir,
-        root_dirs,
-        preserve_jsx,
-        rewrite_extensions,
-    };
 
     for stmt in program.body.iter_mut() {
         let source = match stmt {
@@ -521,53 +510,13 @@ fn resolve_relative_specifiers<'a>(
             _ => None,
         };
 
-        if let Some(source) = source {
-            rewriter.rewrite(source);
-        }
-    }
-
-    // Dynamic import("./x.ts") specifiers can appear in any expression
-    // position and need a full program walk to find. Only the extension
-    // rewrite applies to them (extensionless dynamic imports are left
-    // untouched), so the walk is skipped entirely unless rewrite_extensions
-    // is on and the parser recorded dynamic imports.
-    if rewrite_extensions && has_dynamic_imports {
-        rewriter.visit_program(program);
-    }
-}
-
-struct SpecifierRewriter<'a, 'b> {
-    allocator: &'a Allocator,
-    base_dir: &'b Path,
-    root_dirs: &'b [PathBuf],
-    preserve_jsx: bool,
-    rewrite_extensions: bool,
-}
-
-impl<'a> SpecifierRewriter<'a, '_> {
-    fn rewrite(&mut self, source: &mut StringLiteral<'a>) {
-        if let Some(resolved) = resolve_specifier_across(
-            self.base_dir,
-            source.value.as_str(),
-            self.root_dirs,
-            self.preserve_jsx,
-            self.rewrite_extensions,
-        ) {
-            source.value = self.allocator.alloc_str(&resolved).into();
+        if let Some(source) = source
+            && let Some(resolved) =
+                resolve_specifier_across(base_dir, source.value.as_str(), root_dirs)
+        {
+            source.value = allocator.alloc_str(&resolved).into();
             source.raw = None;
         }
-    }
-}
-
-impl<'a> VisitMut<'a> for SpecifierRewriter<'a, '_> {
-    fn visit_import_expression(&mut self, expr: &mut ImportExpression<'a>) {
-        if let Expression::StringLiteral(lit) = &mut expr.source
-            && let Some(rewritten) = rewrite_ts_extension(lit.value.as_str(), self.preserve_jsx)
-        {
-            lit.value = self.allocator.alloc_str(&rewritten).into();
-            lit.raw = None;
-        }
-        walk_mut::walk_import_expression(self, expr);
     }
 }
 
@@ -575,32 +524,12 @@ impl<'a> VisitMut<'a> for SpecifierRewriter<'a, '_> {
 // resolves "./foo" to foo.ts.
 const RESOLVABLE_EXTS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
-fn js_ext_for(src_ext: &str, preserve_jsx: bool) -> &'static str {
+fn js_ext_for(src_ext: &str) -> &'static str {
     match src_ext {
         "mts" | "mjs" => "mjs",
         "cts" | "cjs" => "cjs",
-        "tsx" | "jsx" if preserve_jsx => "jsx",
         _ => "js",
     }
-}
-
-// TypeScript source extensions that `rewriteRelativeImportExtensions` rewrites
-// to their JS equivalent. Other extensions (.js, .jsx, .mjs, .cjs, ...) are
-// already valid runtime specifiers and are left untouched, matching tsc.
-const REWRITABLE_TS_EXTS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
-
-// Rewrite a relative specifier with a TypeScript extension (e.g. "./foo.ts")
-// to its emitted JS extension. Returns None for anything else.
-fn rewrite_ts_extension(specifier: &str, preserve_jsx: bool) -> Option<String> {
-    if !specifier.starts_with("./") && !specifier.starts_with("../") {
-        return None;
-    }
-    let ext = Path::new(specifier).extension()?.to_str()?;
-    if !REWRITABLE_TS_EXTS.contains(&ext) {
-        return None;
-    }
-    let stem = specifier.strip_suffix(&format!(".{ext}"))?;
-    Some(format!("{stem}.{}", js_ext_for(ext, preserve_jsx)))
 }
 
 // Declaration-only targets resolve like tsc: importing "./gen" where only gen.d.ts exists emits
@@ -652,31 +581,21 @@ fn candidate_targets(base_dir: &Path, specifier: &str, root_dirs: &[PathBuf]) ->
     targets
 }
 
-fn resolve_specifier(
-    base_dir: &Path,
-    specifier: &str,
-    preserve_jsx: bool,
-    rewrite_extensions: bool,
-) -> Option<String> {
-    resolve_specifier_across(base_dir, specifier, &[], preserve_jsx, rewrite_extensions)
+fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<String> {
+    resolve_specifier_across(base_dir, specifier, &[])
 }
 
 fn resolve_specifier_across(
     base_dir: &Path,
     specifier: &str,
     root_dirs: &[PathBuf],
-    preserve_jsx: bool,
-    rewrite_extensions: bool,
 ) -> Option<String> {
     if !specifier.starts_with("./") && !specifier.starts_with("../") {
         return None;
     }
 
+    // Already fully specified; extension rewriting is the transformer's job.
     if Path::new(specifier).extension().is_some() {
-        if rewrite_extensions {
-            return rewrite_ts_extension(specifier, preserve_jsx);
-        }
-        // Already has an extension and rewriting is disabled: leave as-is.
         return None;
     }
 
@@ -686,7 +605,7 @@ fn resolve_specifier_across(
     for target in candidate_targets(base_dir, specifier, root_dirs) {
         for ext in RESOLVABLE_EXTS {
             if target.with_extension(ext).is_file() {
-                return Some(format!("{specifier}.{}", js_ext_for(ext, preserve_jsx)));
+                return Some(format!("{specifier}.{}", js_ext_for(ext)));
             }
         }
 
@@ -700,10 +619,7 @@ fn resolve_specifier_across(
 
         for ext in RESOLVABLE_EXTS {
             if target.join(format!("index.{ext}")).is_file() {
-                return Some(format!(
-                    "{specifier}/index.{}",
-                    js_ext_for(ext, preserve_jsx)
-                ));
+                return Some(format!("{specifier}/index.{}", js_ext_for(ext)));
             }
         }
 
@@ -1113,17 +1029,14 @@ mod tests {
 
     #[test]
     fn js_ext_mapping() {
-        assert_eq!(js_ext_for("ts", false), "js");
-        assert_eq!(js_ext_for("tsx", false), "js");
-        assert_eq!(js_ext_for("mts", false), "mjs");
-        assert_eq!(js_ext_for("cts", false), "cjs");
-        assert_eq!(js_ext_for("js", false), "js");
-        assert_eq!(js_ext_for("jsx", false), "js");
-        assert_eq!(js_ext_for("mjs", false), "mjs");
-        assert_eq!(js_ext_for("cjs", false), "cjs");
-        assert_eq!(js_ext_for("tsx", true), "jsx");
-        assert_eq!(js_ext_for("jsx", true), "jsx");
-        assert_eq!(js_ext_for("ts", true), "js");
+        assert_eq!(js_ext_for("ts"), "js");
+        assert_eq!(js_ext_for("tsx"), "js");
+        assert_eq!(js_ext_for("mts"), "mjs");
+        assert_eq!(js_ext_for("cts"), "cjs");
+        assert_eq!(js_ext_for("js"), "js");
+        assert_eq!(js_ext_for("jsx"), "js");
+        assert_eq!(js_ext_for("mjs"), "mjs");
+        assert_eq!(js_ext_for("cjs"), "cjs");
     }
 
     #[test]
@@ -1325,9 +1238,9 @@ mod tests {
     #[test]
     fn resolve_specifier_ignores_bare_and_extensioned() {
         let dir = test_dir("resolve_ignores");
-        assert_eq!(resolve_specifier(&dir, "lodash", false, false), None);
-        assert_eq!(resolve_specifier(&dir, "./b.js", false, false), None);
-        assert_eq!(resolve_specifier(&dir, "./b.ts", false, false), None);
+        assert_eq!(resolve_specifier(&dir, "lodash"), None);
+        assert_eq!(resolve_specifier(&dir, "./b.js"), None);
+        assert_eq!(resolve_specifier(&dir, "./b.ts"), None);
     }
 
     #[test]
@@ -1337,11 +1250,11 @@ mod tests {
         fs::write(dir.join("c.mts"), "").unwrap();
         fs::write(dir.join("d.jsx"), "").unwrap();
         fs::write(dir.join("e.cjs"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b", false, false), Some("./b.js".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./c", false, false), Some("./c.mjs".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./d", false, false), Some("./d.js".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./e", false, false), Some("./e.cjs".to_string()));
-        assert_eq!(resolve_specifier(&dir, "./missing", false, false), None);
+        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./c"), Some("./c.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./d"), Some("./d.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./e"), Some("./e.cjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./missing"), None);
     }
 
     #[test]
@@ -1349,7 +1262,7 @@ mod tests {
         let dir = test_dir("resolve_prefers_ts");
         fs::write(dir.join("b.mts"), "").unwrap();
         fs::write(dir.join("b.js"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b", false, false), Some("./b.mjs".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.mjs".to_string()));
     }
 
     #[test]
@@ -1358,7 +1271,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/index.ts"), "").unwrap();
         assert_eq!(
-            resolve_specifier(&dir, "./sub", false, false),
+            resolve_specifier(&dir, "./sub"),
             Some("./sub/index.js".to_string())
         );
     }
@@ -1369,47 +1282,7 @@ mod tests {
         fs::write(dir.join("b.ts"), "").unwrap();
         fs::create_dir_all(dir.join("b")).unwrap();
         fs::write(dir.join("b/index.ts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./b", false, false), Some("./b.js".to_string()));
-    }
-
-    #[test]
-    fn resolve_specifier_leaves_ts_extension_when_rewrite_disabled() {
-        let dir = test_dir("resolve_rewrite_disabled");
-        assert_eq!(resolve_specifier(&dir, "./b.ts", false, false), None);
-    }
-
-    #[test]
-    fn resolve_specifier_rewrites_ts_extensions_when_enabled() {
-        let dir = test_dir("resolve_rewrite_enabled");
-        assert_eq!(
-            resolve_specifier(&dir, "./b.ts", false, true),
-            Some("./b.js".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&dir, "./b.mts", false, true),
-            Some("./b.mjs".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&dir, "./b.cts", false, true),
-            Some("./b.cjs".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&dir, "./b.tsx", false, true),
-            Some("./b.js".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&dir, "./b.tsx", true, true),
-            Some("./b.jsx".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_specifier_never_rewrites_js_extensions() {
-        let dir = test_dir("resolve_rewrite_js_untouched");
-        assert_eq!(resolve_specifier(&dir, "./b.js", false, true), None);
-        assert_eq!(resolve_specifier(&dir, "./b.jsx", false, true), None);
-        assert_eq!(resolve_specifier(&dir, "./b.mjs", false, true), None);
-        assert_eq!(resolve_specifier(&dir, "./b.cjs", false, true), None);
+        assert_eq!(resolve_specifier(&dir, "./b"), Some("./b.js".to_string()));
     }
 
     #[test]
@@ -1424,22 +1297,22 @@ mod tests {
         let roots = [dir.join("app"), dir.join("lib")];
         let base = dir.join("app");
         assert_eq!(
-            resolve_specifier_across(&base, "./shared", &roots, false, false),
+            resolve_specifier_across(&base, "./shared", &roots),
             Some("./shared.js".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./gen", &roots, false, false),
+            resolve_specifier_across(&base, "./gen", &roots),
             Some("./gen.js".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./genm", &roots, false, false),
+            resolve_specifier_across(&base, "./genm", &roots),
             Some("./genm.mjs".to_string())
         );
         assert_eq!(
-            resolve_specifier_across(&base, "./sub", &roots, false, false),
+            resolve_specifier_across(&base, "./sub", &roots),
             Some("./sub/index.js".to_string())
         );
-        assert_eq!(resolve_specifier_across(&base, "./missing", &roots, false, false), None);
+        assert_eq!(resolve_specifier_across(&base, "./missing", &roots), None);
     }
 
     #[test]
@@ -1450,7 +1323,7 @@ mod tests {
         fs::write(dir.join("lib/deep/util.ts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app/deep"), "./util", &roots, false, false),
+            resolve_specifier_across(&dir.join("app/deep"), "./util", &roots),
             Some("./util.js".to_string())
         );
     }
@@ -1464,7 +1337,7 @@ mod tests {
         fs::write(dir.join("lib/x.mts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app"), "./x", &roots, false, false),
+            resolve_specifier_across(&dir.join("app"), "./x", &roots),
             Some("./x.js".to_string())
         );
     }
@@ -1480,7 +1353,7 @@ mod tests {
         fs::write(dir.join("generated/x.mts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("generated")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("app"), "./x", &roots, false, false),
+            resolve_specifier_across(&dir.join("app"), "./x", &roots),
             Some("./x/index.js".to_string())
         );
     }
@@ -1496,7 +1369,7 @@ mod tests {
         fs::write(dir.join("other/gen/x.tsx"), "").unwrap();
         let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("src/gen"), "./x", &roots, false, false),
+            resolve_specifier_across(&dir.join("src/gen"), "./x", &roots),
             Some("./x.js".to_string())
         );
     }
@@ -1511,7 +1384,7 @@ mod tests {
         fs::write(dir.join("other/x.tsx"), "").unwrap();
         let roots = [dir.join("src"), dir.join("src/gen"), dir.join("other")];
         assert_eq!(
-            resolve_specifier_across(&dir.join("src/gen"), "../x", &roots, false, false),
+            resolve_specifier_across(&dir.join("src/gen"), "../x", &roots),
             Some("../x.js".to_string())
         );
     }
@@ -1526,11 +1399,11 @@ mod tests {
         fs::write(dir.join("gen/index.d.ts"), "").unwrap();
         fs::write(dir.join("genm/index.d.mts"), "").unwrap();
         assert_eq!(
-            resolve_specifier(&dir, "./gen", false, false),
+            resolve_specifier(&dir, "./gen"),
             Some("./gen/index.js".to_string())
         );
         assert_eq!(
-            resolve_specifier(&dir, "./genm", false, false),
+            resolve_specifier(&dir, "./genm"),
             Some("./genm/index.mjs".to_string())
         );
     }
@@ -1542,7 +1415,7 @@ mod tests {
         fs::create_dir_all(dir.join("other")).unwrap();
         fs::write(dir.join("app/y.ts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
-        assert_eq!(resolve_specifier_across(&dir.join("other"), "./y", &roots, false, false), None);
+        assert_eq!(resolve_specifier_across(&dir.join("other"), "./y", &roots), None);
     }
 
     #[test]
@@ -1550,9 +1423,9 @@ mod tests {
         let dir = test_dir("resolve_sibling_dts");
         fs::write(dir.join("gen.d.ts"), "").unwrap();
         fs::write(dir.join("genc.d.cts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./gen", false, false), Some("./gen.js".to_string()));
+        assert_eq!(resolve_specifier(&dir, "./gen"), Some("./gen.js".to_string()));
         assert_eq!(
-            resolve_specifier(&dir, "./genc", false, false),
+            resolve_specifier(&dir, "./genc"),
             Some("./genc.cjs".to_string())
         );
     }
@@ -1665,13 +1538,60 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_ts_extension_only_rewrites_relative_ts_specifiers() {
-        assert_eq!(rewrite_ts_extension("./b.ts", false), Some("./b.js".to_string()));
-        assert_eq!(rewrite_ts_extension("../b.cts", false), Some("../b.cjs".to_string()));
-        assert_eq!(rewrite_ts_extension("./b.tsx", true), Some("./b.jsx".to_string()));
-        assert_eq!(rewrite_ts_extension("./b.js", false), None);
-        assert_eq!(rewrite_ts_extension("./b", false), None);
-        assert_eq!(rewrite_ts_extension("lodash", false), None);
+    fn transpile_rewrites_static_import_extensions() {
+        let options = Options {
+            emit_dts: false,
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let result = transpile(
+            "a.ts",
+            "export { b } from \"./b.ts\";\nexport { c } from \"../c.cts\";\nexport { d } from \"./d.js\";\n",
+            &options,
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"./b.js\""), "js: {js}");
+        assert!(js.contains("\"../c.cjs\""), "js: {js}");
+        assert!(js.contains("\"./d.js\""), "js: {js}");
+    }
+
+    #[test]
+    fn transpile_leaves_ts_extension_when_rewrite_disabled() {
+        let options = Options {
+            emit_dts: false,
+            ..default_options()
+        };
+        let result = transpile("a.ts", "export { b } from \"./b.ts\";\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("\"./b.ts\""));
+    }
+
+    // oxc rewrites any slash-containing specifier, bare package paths included, unlike tsc.
+    #[test]
+    fn transpile_rewrites_bare_specifier_with_slash() {
+        let options = Options {
+            emit_dts: false,
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let result = transpile("a.ts", "export { x } from \"pkg/x.ts\";\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("\"pkg/x.js\""));
+    }
+
+    // Known limitation: .tsx rewrites to .js even with --jsx preserve, where emitted files are .jsx.
+    #[test]
+    fn transpile_rewrites_tsx_to_js_even_with_jsx_preserve() {
+        let options = Options {
+            emit_dts: false,
+            jsx: JsxMode::Preserve,
+            rewrite_extensions: true,
+            ..default_options()
+        };
+        let result = transpile("a.tsx", "export { b } from \"./b.tsx\";\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.js_code.unwrap().contains("\"./b.js\""));
     }
 
     #[test]

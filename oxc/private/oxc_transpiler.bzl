@@ -319,11 +319,13 @@ _oxc_transpiler_rule = rule(
         ),
         "rewrite_extensions": attr.bool(
             default = False,
-            doc = "Rewrite relative import/export specifiers that already end in " +
-                  "'.ts', '.tsx', '.mts', or '.cts' to their emitted JS extension, " +
-                  "like tsc's rewriteRelativeImportExtensions and swc's " +
-                  "jsc.rewriteRelativeImportExtensions. Specifiers with other " +
-                  "extensions (e.g. '.js') are left untouched.",
+            doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
+                  "'.mts', or '.cts' to their emitted JS extension, using oxc's " +
+                  "rewrite_import_extensions transform. Unlike tsc's " +
+                  "rewriteRelativeImportExtensions, any slash-containing specifier " +
+                  "is rewritten (including bare package paths), and '.tsx' always " +
+                  "maps to '.js' even with preserve_jsx (see README limitations). " +
+                  "Specifiers with other extensions (e.g. '.js') are left untouched.",
         ),
         "_tool": attr.label(
             executable = True,

@@ -114,12 +114,16 @@ def _declare(ctx, predeclared, out_path):
         out = ctx.actions.declare_file(out_path)
     return out
 
-def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
+def _run_transpile(ctx, srcs, declaration_srcs, js_outs, dts_outs, map_outs):
     """Run one transpiler action emitting JS and/or declaration outputs.
 
     Each manifest entry is the source path followed by its JS output path
     (when emitting JS) and its declaration output path (when emitting dts).
     A dts entry may be None (plain JS sources), written as an empty line.
+
+    declaration_srcs are .d.ts sources that produce no outputs but are staged
+    as action inputs so relative import resolution (including across
+    root_dirs) can see them on disk.
     """
     emit_dts = ctx.attr.emit_dts and any(dts_outs)
 
@@ -148,13 +152,21 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--module", ctx.attr.module)
         if ctx.attr.helpers_module:
             args.add("--helpers-module", ctx.attr.helpers_module)
+        prefix = ctx.label.package + "/" if ctx.label.package else ""
+        for root in ctx.attr.root_dirs:
+            args.add("--root-dirs", prefix + root)
+
+            # Generated srcs live under the output tree, so each root is also passed at its
+            # bin-dir path; the resolver's longest-prefix match then covers importers and
+            # import targets on either side.
+            args.add("--root-dirs", ctx.bin_dir.path + "/" + prefix + root)
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
     args.add(manifest)
 
     ctx.actions.run(
-        inputs = srcs + [manifest],
+        inputs = srcs + declaration_srcs + [manifest],
         arguments = [args],
         mnemonic = "OxcTranspile",
         executable = ctx.executable._tool,
@@ -184,6 +196,7 @@ def _oxc_transpiler_impl(ctx):
     dts_outs = []  # declaration files only, for JsInfo types
     json_outs = []  # data files copied through unchanged, alongside JS outputs
     transpile_srcs = []
+    declaration_srcs = []  # .d.ts sources: no outputs, staged for resolution
     transpile_js_outs = []  # aligned with transpile_srcs
     transpile_dts_outs = []  # aligned with transpile_srcs
     map_outs = []
@@ -192,6 +205,7 @@ def _oxc_transpiler_impl(ctx):
 
     for src, src_path in zip(ctx.files.srcs, src_paths):
         if _is_declaration(src_path):
+            declaration_srcs.append(src)
             continue
 
         if root_dir != "" and not src_path.startswith(root_dir + "/"):
@@ -241,7 +255,7 @@ def _oxc_transpiler_impl(ctx):
                 transpile_dts_outs.append(out)
 
     if transpile_srcs:
-        _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs)
+        _run_transpile(ctx, transpile_srcs, declaration_srcs, transpile_js_outs, transpile_dts_outs, map_outs)
 
     # Mirror the ts_project provider shape: source maps count as sources,
     # DefaultInfo falls back to types when no JS is emitted, declarations are
@@ -305,6 +319,16 @@ _oxc_transpiler_rule = rule(
                   "Defaults to out_dir.",
         ),
         "root_dir": attr.string(),
+        "root_dirs": attr.string_list(
+            doc = "Package-relative directories overlaid into one virtual " +
+                  "directory when resolving relative imports, like tsc's " +
+                  "rootDirs. An extensionless relative import that does not " +
+                  "resolve next to its source is looked up at the same " +
+                  "relative location under the other root_dirs (declaration " +
+                  "sources included) to pick the emitted JS extension; the " +
+                  "specifier text is otherwise left unchanged, so the files " +
+                  "must be merged into one directory at runtime.",
+        ),
         "emit_js": attr.bool(
             default = True,
             doc = "Emit JavaScript outputs.",
@@ -407,6 +431,7 @@ def oxc_transpiler(
         helpers_module = "",
         jsx = "",
         module = "",
+        root_dirs = [],
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -426,5 +451,6 @@ def oxc_transpiler(
         target = target or "",
         helpers_module = helpers_module or "",
         module = module or "",
+        root_dirs = root_dirs or [],
         **kwargs
     )

@@ -537,3 +537,59 @@ diff_test(
     file1 = "esmout/main.js",
     file2 = "snapshots/main.js",
 )
+
+# Generated sources land under the output tree; the rule maps each root to its bin-dir path too,
+# so they participate in root_dirs resolution.
+genrule(
+    name = "genmod_ts",
+    outs = ["src/virtual/genr/genmod.ts"],
+    cmd = "echo 'export const generated: number = 4;' > $@",
+)
+
+# root_dirs: like tsc's rootDirs, app, lib, and the generated genr root form one virtual
+# directory for resolving relative imports. main.ts resolves "./local" beside itself, "./shared"
+# from the lib root, "./gen" from a declaration-only source in the lib root, and "./genmod" from
+# a generated source in the genr root.
+oxc_transpiler(
+    name = "transpile_root_dirs",
+    srcs = [
+        "src/virtual/app/local.ts",
+        "src/virtual/app/main.ts",
+        "src/virtual/lib/gen.d.ts",
+        "src/virtual/lib/shared.ts",
+        ":genmod_ts",
+    ],
+    out_dir = "virtualout",
+    root_dir = "src/virtual",
+    root_dirs = [
+        "src/virtual/app",
+        "src/virtual/lib",
+        "src/virtual/genr",
+    ],
+)
+
+diff_test(
+    name = "root_dirs_main_test",
+    file1 = "virtualout/app/main.js",
+    file2 = "snapshots/main_root_dirs.js",
+)
+
+# Without root_dirs the same sources fail to resolve "./shared", "./gen", and "./genmod":
+# specifiers are left extensionless, matching the previous behavior.
+oxc_transpiler(
+    name = "transpile_root_dirs_off",
+    srcs = [
+        "src/virtual/app/local.ts",
+        "src/virtual/app/main.ts",
+        "src/virtual/lib/gen.d.ts",
+        "src/virtual/lib/shared.ts",
+    ],
+    out_dir = "virtualoff",
+    root_dir = "src/virtual",
+)
+
+diff_test(
+    name = "root_dirs_off_main_test",
+    file1 = "virtualoff/app/main.js",
+    file2 = "snapshots/main_root_dirs_off.js",
+)

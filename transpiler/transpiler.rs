@@ -59,6 +59,9 @@ struct Options {
     use_define_for_class_fields: bool,
     // tsc's stripInternal: omit declarations marked /** @internal */ from the .d.ts outputs.
     strip_internal: bool,
+    // tsc's verbatimModuleSyntax: only imports/exports marked `type` are removed, instead of
+    // eliding any import that is unused after type stripping.
+    only_remove_type_imports: bool,
 }
 
 struct Entry {
@@ -122,6 +125,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             jsx_pragma_frag: None,
             use_define_for_class_fields: false,
             strip_internal: false,
+            only_remove_type_imports: false,
         },
         manifest_path: None,
         positional: Vec::new(),
@@ -165,6 +169,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
             "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
             "--strip-internal" => cli.options.strip_internal = true,
+            "--only-remove-type-imports" => cli.options.only_remove_type_imports = true,
             "--target" => {
                 let target = flag_value(&mut args, &arg, "a value")?;
                 cli.options.env = Some(
@@ -352,6 +357,9 @@ fn build_transform_options(options: &Options) -> TransformOptions {
         typescript: {
             let mut typescript = TypeScriptOptions {
                 remove_class_fields_without_initializer: !options.use_define_for_class_fields,
+                // Like tsc's verbatimModuleSyntax: keep imports that are unused after type
+                // stripping.
+                only_remove_type_imports: options.only_remove_type_imports,
                 // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any
                 // slash-containing .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always
                 // maps to .js (never .jsx).
@@ -638,6 +646,7 @@ mod tests {
             jsx_pragma_frag: None,
             use_define_for_class_fields: false,
             strip_internal: false,
+            only_remove_type_imports: false,
         }
     }
 
@@ -1021,6 +1030,28 @@ mod tests {
         let dts = stripped.dts_code.unwrap();
         assert!(!dts.contains("secret"), "dts: {dts}");
         assert!(dts.contains("open"), "dts: {dts}");
+    }
+
+    // Without the flag, imports left unused after type stripping are elided; with it they are
+    // kept verbatim, like tsc's verbatimModuleSyntax. Type-only imports are removed either way.
+    #[test]
+    fn only_remove_type_imports_keeps_unused_imports() {
+        let src = "import { sideEffect } from \"./fx.js\";\nimport type { T } from \"./t.js\";\nexport const x: number = 1;\n";
+        let elided = transpile("a.ts", src, &Options { emit_dts: false, ..default_options() });
+        assert!(elided.errors.is_empty(), "errors: {:?}", elided.errors);
+        let js = elided.js_code.unwrap();
+        assert!(!js.contains("./fx.js"), "js: {js}");
+
+        let options = Options {
+            emit_dts: false,
+            only_remove_type_imports: true,
+            ..default_options()
+        };
+        let kept = transpile("a.ts", src, &options);
+        assert!(kept.errors.is_empty(), "errors: {:?}", kept.errors);
+        let js = kept.js_code.unwrap();
+        assert!(js.contains("import { sideEffect } from \"./fx.js\""), "js: {js}");
+        assert!(!js.contains("./t.js"), "js: {js}");
     }
 
     #[test]

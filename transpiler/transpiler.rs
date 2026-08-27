@@ -10,7 +10,8 @@ use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
 use oxc::transformer::{
-    CompilerAssumptions, EnvOptions, JsxOptions, TransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, TransformOptions,
+    Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,9 @@ struct Options {
     // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's
     // `target`. None leaves syntax at the latest ES version.
     env: Option<EnvOptions>,
+    // Module to import runtime helpers from, defaulting to @oxc-project/runtime. Helpers are
+    // always imported (like tsc's importHelpers): oxc has no inline helper mode.
+    helpers_module: Option<String>,
 }
 
 struct Entry {
@@ -49,6 +53,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
         preserve_jsx: false,
         rewrite_extensions: false,
         env: None,
+        helpers_module: None,
     };
     let mut manifest_path: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -68,6 +73,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
                 options.env = Some(
                     EnvOptions::from_target(&target)
                         .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
+                );
+            }
+            "--helpers-module" => {
+                options.helpers_module = Some(
+                    args_iter
+                        .next()
+                        .ok_or_else(|| vec!["error: --helpers-module requires a value".to_string()])?,
                 );
             }
             "--manifest" => {
@@ -148,6 +160,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
             preserve_jsx: options.preserve_jsx,
             rewrite_extensions: options.rewrite_extensions,
             env: options.env.clone(),
+            helpers_module: options.helpers_module.clone(),
         };
         let result = transpile(&entry.src, &content, &entry_options);
         if !result.errors.is_empty() {
@@ -187,6 +200,38 @@ struct TranspileResult {
     js_map: Option<String>,
     dts_code: Option<String>,
     errors: Vec<String>,
+}
+
+fn transform_options(options: &Options) -> TransformOptions {
+    TransformOptions {
+        // Match the SWC useDefineForClassFields=false behaviour:
+        // class fields without initializers are removed rather than set to undefined.
+        assumptions: CompilerAssumptions {
+            set_public_class_fields: true,
+            ..Default::default()
+        },
+        typescript: TypeScriptOptions {
+            remove_class_fields_without_initializer: true,
+            ..Default::default()
+        },
+        // Like tsc's jsx=preserve: strip types but leave JSX untouched.
+        jsx: if options.preserve_jsx {
+            JsxOptions::disable()
+        } else {
+            JsxOptions::default()
+        },
+        env: options.env.clone().unwrap_or_default(),
+        // Helpers are imported like tsc's importHelpers (oxc's only implemented mode);
+        // --helpers-module redirects the imports away from the default @oxc-project/runtime.
+        helper_loader: HelperLoaderOptions {
+            module_name: match &options.helpers_module {
+                Some(name) => name.clone().into(),
+                None => HelperLoaderOptions::default().module_name,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn render_errors(
@@ -250,26 +295,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         let semantic_diagnostics = semantic_ret.diagnostics;
         let scoping = semantic_ret.semantic.into_scoping();
 
-        let transform_options = TransformOptions {
-            // Match the SWC useDefineForClassFields=false behaviour:
-            // class fields without initializers are removed rather than set to undefined.
-            assumptions: CompilerAssumptions {
-                set_public_class_fields: true,
-                ..Default::default()
-            },
-            typescript: TypeScriptOptions {
-                remove_class_fields_without_initializer: true,
-                ..Default::default()
-            },
-            // Like tsc's jsx=preserve: strip types but leave JSX untouched.
-            jsx: if options.preserve_jsx {
-                JsxOptions::disable()
-            } else {
-                JsxOptions::default()
-            },
-            env: options.env.clone().unwrap_or_default(),
-            ..Default::default()
-        };
+        let transform_options = transform_options(options);
 
         let transformer_ret = Transformer::new(&allocator, Path::new(filename), &transform_options)
             .build_with_scoping(scoping, &mut parser_ret.program);
@@ -475,6 +501,7 @@ mod tests {
             preserve_jsx: false,
             rewrite_extensions: false,
             env: None,
+            helpers_module: None,
         }
     }
 
@@ -545,6 +572,61 @@ mod tests {
     fn run_requires_target_value() {
         let err = run(args(&["--emit-js", "--target"])).unwrap_err();
         assert_eq!(err, vec!["error: --target requires a value".to_string()]);
+    }
+
+    // Helpers only appear when a transform needs one, and none does in the default configuration;
+    // downlevel async to es2016 so the transform pulls in the asyncToGenerator helper.
+    fn helpers_options(helpers_module: Option<&str>) -> Options {
+        Options {
+            emit_dts: false,
+            env: Some(EnvOptions::from_target("es2016").unwrap()),
+            helpers_module: helpers_module.map(str::to_string),
+            ..default_options()
+        }
+    }
+
+    #[test]
+    fn helpers_imported_from_default_module() {
+        let result = transpile(
+            "a.ts",
+            "export async function f(): Promise<number> { return 1; }\n",
+            &helpers_options(None),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"@oxc-project/runtime/helpers/asyncToGenerator\""), "js: {js}");
+    }
+
+    #[test]
+    fn helpers_module_redirects_helper_imports() {
+        let result = transpile(
+            "a.ts",
+            "export async function f(): Promise<number> { return 1; }\n",
+            &helpers_options(Some("custom-helpers")),
+        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(js.contains("\"custom-helpers/helpers/asyncToGenerator\""), "js: {js}");
+        assert!(!js.contains("@oxc-project/runtime"), "js: {js}");
+    }
+
+    #[test]
+    fn helpers_module_leaves_helperless_output_unchanged() {
+        let options = Options {
+            emit_dts: false,
+            helpers_module: Some("custom-helpers".to_string()),
+            ..default_options()
+        };
+        let result = transpile("a.ts", "export const x: number = 1;\n", &options);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let js = result.js_code.unwrap();
+        assert!(!js.contains("custom-helpers"), "js: {js}");
+    }
+
+    #[test]
+    fn run_requires_helpers_module_value() {
+        let err = run(args(&["--emit-js", "--helpers-module"])).unwrap_err();
+        assert_eq!(err, vec!["error: --helpers-module requires a value".to_string()]);
     }
 
     #[test]

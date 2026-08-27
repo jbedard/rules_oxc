@@ -278,8 +278,13 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>
     let mut outputs: Vec<Output> = Vec::new();
 
     for entry in entries {
-        let content = fs::read_to_string(&entry.src)
-            .map_err(|e| vec![format!("error: cannot read {}: {e}", entry.src)])?;
+        let content = match fs::read_to_string(&entry.src) {
+            Ok(content) => content,
+            Err(e) => {
+                all_errors.push(format!("error: cannot read {}: {e}", entry.src));
+                continue;
+            }
+        };
 
         // Declaration files pass through unchanged and have no JS output.
         if is_declaration_file(&entry.src) {
@@ -1550,5 +1555,24 @@ mod tests {
         // Both failing entries are reported, and no outputs are written.
         assert!(err.len() >= 2, "errors: {err:?}");
         assert!(!good_out.exists());
+    }
+
+    // An unreadable source is reported alongside other entries' errors instead of aborting the pass.
+    #[test]
+    fn run_aggregates_read_errors_across_entries() {
+        let dir = test_dir("run_read_error_aggregation");
+        let missing = dir.join("missing.ts");
+        let bad = dir.join("bad.ts");
+        fs::write(&bad, "const = ;").unwrap();
+        let err = run(args(&[
+            "--emit-js",
+            missing.to_str().unwrap(),
+            dir.join("out/missing.js").to_str().unwrap(),
+            bad.to_str().unwrap(),
+            dir.join("out/bad.js").to_str().unwrap(),
+        ]))
+        .unwrap_err();
+        assert!(err.len() >= 2, "errors: {err:?}");
+        assert!(err[0].contains("cannot read"), "errors: {err:?}");
     }
 }

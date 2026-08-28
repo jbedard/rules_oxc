@@ -27,6 +27,8 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
   `verbatim_module_syntax`, keeping imports unused after type stripping.
 - `strip_internal` - tsconfig `stripInternal` mirrored by `strip_internal`,
   omitting `@internal` declarations from the shared transpile target's `.d.ts`.
+- `jsx_import_source` - tsconfig `jsxImportSource` mirrored by
+  `jsx_import_source` for the automatic runtime.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

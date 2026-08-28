@@ -222,6 +222,52 @@ diff_test(
     file2 = "snapshots/component_classic.js",
 )
 
+# jsx_import_source redirects the automatic runtime import from "react" to the
+# given module, like tsc's jsxImportSource, for every runtime import (jsx, jsxs
+# and Fragment) and for plain .jsx sources too; explicit jsx = "automatic" is
+# the same as leaving it unset.
+[
+    (
+        oxc_transpiler(
+            name = "transpile_jsx_import_source_" + name,
+            srcs = [
+                "src/component.tsx",
+                "src/fragment.tsx",
+                "src/widget.jsx",
+            ],
+            emit_dts = True,
+            jsx = jsx,
+            jsx_import_source = "preact",
+            out_dir = "importsource_" + name,
+            root_dir = "src",
+        ),
+        diff_test(
+            name = "jsx_import_source_" + name + "_test",
+            file1 = "importsource_" + name + "/component.js",
+            file2 = "snapshots/component_preact.js",
+        ),
+        diff_test(
+            name = "jsx_import_source_" + name + "_fragment_test",
+            file1 = "importsource_" + name + "/fragment.js",
+            file2 = "snapshots/fragment_preact.js",
+        ),
+        diff_test(
+            name = "jsx_import_source_" + name + "_widget_test",
+            file1 = "importsource_" + name + "/widget.js",
+            file2 = "snapshots/widget_preact.js",
+        ),
+        diff_test(
+            name = "jsx_import_source_" + name + "_dts_test",
+            file1 = "importsource_" + name + "/component.d.ts",
+            file2 = "snapshots/component.d.ts",
+        ),
+    )
+    for name, jsx in [
+        ("default", ""),
+        ("automatic", "automatic"),
+    ]
+]
+
 diff_test(
     name = "dts_component_test",
     file1 = "dist/component.d.ts",

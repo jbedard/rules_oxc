@@ -14,11 +14,6 @@ fn js_ext_for(src_ext: &str) -> &'static str {
     }
 }
 
-// Declaration-only targets resolve like tsc: importing "./gen" where only gen.d.ts exists emits
-// "./gen.js", assuming the implementation exists at runtime.
-const DECLARATION_SUFFIXES: &[(&str, &str)] =
-    &[(".d.ts", "js"), (".d.mts", "mjs"), (".d.cts", "cjs")];
-
 // Lexically fold "." and ".." components so root prefixes match without filesystem access.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -94,8 +89,8 @@ pub(crate) fn resolve_specifier(
 
     let has_extension = Path::new(trimmed).extension().is_some();
 
-    // Each candidate target is resolved completely (file, declaration, then index file) before moving
-    // to the next, matching tsc: a directory's own index file wins over a file in a later root.
+    // Each candidate target is resolved completely (file, then index file) before moving to the
+    // next, matching tsc: a directory's own index file wins over a file in a later root.
     for target in candidate_targets(base_dir, trimmed, root_dirs) {
         if !dir_only {
             // An extensioned specifier naming an existing file (e.g. a ./data.json asset copied
@@ -124,18 +119,14 @@ fn with_suffix(target: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-// The emitted JS extension for a source or declaration file existing at `target` with any
-// resolvable extension appended, or None when no such file exists.
+// The emitted JS extension for a source file existing at `target` with any resolvable extension
+// appended, or None when no such file exists. Declaration files (.d.ts and friends) are not
+// probed: tsc never emits an extension for them either, and the implementation's runtime name
+// cannot be verified from a declaration alone.
 fn probe(target: &Path) -> Option<&'static str> {
     for &ext in RESOLVABLE_EXTS {
         if with_suffix(target, &format!(".{ext}")).is_file() {
             return Some(js_ext_for(ext));
-        }
-    }
-
-    for &(suffix, js_ext) in DECLARATION_SUFFIXES {
-        if with_suffix(target, suffix).is_file() {
-            return Some(js_ext);
         }
     }
 
@@ -197,7 +188,7 @@ mod tests {
         let dir = test_dir("resolve_dotted");
         fs::write(dir.join("foo.service.ts"), "").unwrap();
         fs::write(dir.join("v1.2.mts"), "").unwrap();
-        fs::write(dir.join("gen.v1.d.ts"), "").unwrap();
+        fs::write(dir.join("gen.v1.ts"), "").unwrap();
         fs::write(dir.join("data.json.ts"), "").unwrap();
         assert_eq!(
             resolve_specifier(&dir, "./foo.service", &[]),
@@ -290,22 +281,12 @@ mod tests {
         fs::create_dir_all(dir.join("app")).unwrap();
         fs::create_dir_all(dir.join("lib/sub")).unwrap();
         fs::write(dir.join("lib/shared.ts"), "").unwrap();
-        fs::write(dir.join("lib/gen.d.ts"), "").unwrap();
-        fs::write(dir.join("lib/genm.d.mts"), "").unwrap();
         fs::write(dir.join("lib/sub/index.ts"), "").unwrap();
         let roots = [dir.join("app"), dir.join("lib")];
         let base = dir.join("app");
         assert_eq!(
             resolve_specifier(&base, "./shared", &roots),
             Some("./shared.js".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&base, "./gen", &roots),
-            Some("./gen.js".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&base, "./genm", &roots),
-            Some("./genm.mjs".to_string())
         );
         assert_eq!(
             resolve_specifier(&base, "./sub", &roots),
@@ -388,24 +369,6 @@ mod tests {
         );
     }
 
-    // A directory whose index exists only as a declaration file resolves like tsc, assuming the
-    // JS implementation exists at runtime.
-    #[test]
-    fn resolve_specifier_resolves_declaration_index() {
-        let dir = test_dir("resolve_dts_index");
-        fs::create_dir_all(dir.join("gen")).unwrap();
-        fs::create_dir_all(dir.join("genm")).unwrap();
-        fs::write(dir.join("gen/index.d.ts"), "").unwrap();
-        fs::write(dir.join("genm/index.d.mts"), "").unwrap();
-        assert_eq!(
-            resolve_specifier(&dir, "./gen", &[]),
-            Some("./gen/index.js".to_string())
-        );
-        assert_eq!(
-            resolve_specifier(&dir, "./genm", &[]),
-            Some("./genm/index.mjs".to_string())
-        );
-    }
 
     #[test]
     fn resolve_specifier_outside_roots_unaffected() {
@@ -417,15 +380,17 @@ mod tests {
         assert_eq!(resolve_specifier(&dir.join("other"), "./y", &roots), None);
     }
 
+    // Declaration-only targets do not resolve: tsc never emits an extension for them, and the
+    // implementation's runtime name cannot be verified from a declaration alone.
     #[test]
-    fn resolve_specifier_resolves_sibling_declaration() {
+    fn resolve_specifier_ignores_declaration_only_files() {
         let dir = test_dir("resolve_sibling_dts");
         fs::write(dir.join("gen.d.ts"), "").unwrap();
         fs::write(dir.join("genc.d.cts"), "").unwrap();
-        assert_eq!(resolve_specifier(&dir, "./gen", &[]), Some("./gen.js".to_string()));
-        assert_eq!(
-            resolve_specifier(&dir, "./genc", &[]),
-            Some("./genc.cjs".to_string())
-        );
+        fs::create_dir_all(dir.join("idx")).unwrap();
+        fs::write(dir.join("idx/index.d.ts"), "").unwrap();
+        assert_eq!(resolve_specifier(&dir, "./gen", &[]), None);
+        assert_eq!(resolve_specifier(&dir, "./genc", &[]), None);
+        assert_eq!(resolve_specifier(&dir, "./idx", &[]), None);
     }
 }

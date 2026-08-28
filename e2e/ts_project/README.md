@@ -21,6 +21,8 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
   by `rewrite_extensions`.
 - `module_commonjs` - tsconfig `module: commonjs` mirrored by
   `module = "commonjs"` for `.cts` sources.
+- `use_define_for_class_fields` - tsconfig `useDefineForClassFields: false`
+  mirrored by `use_define_for_class_fields = False`.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

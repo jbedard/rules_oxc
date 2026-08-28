@@ -3,6 +3,8 @@ export function add(a, b) {
 	return a + b;
 }
 export class Vec {
+	x;
+	y;
 	constructor(x, y) {
 		this.x = x;
 		this.y = y;

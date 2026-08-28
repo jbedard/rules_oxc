@@ -88,7 +88,13 @@ def _to_json_out(src, out_dir, root_dir):
     if not path.endswith(".json"):
         return None
 
-    return _out_path(path, out_dir, root_dir)
+    out = _out_path(path, out_dir, root_dir)
+    if out == path:
+        fail(
+            "The src \"{}\" would be copied to the same path as the input. ".format(path) +
+            "Set out_dir to write outputs to a different directory.",
+        )
+    return out
 
 def _calculate_outs(srcs, to_out, *args):
     outs = []
@@ -174,11 +180,7 @@ def _oxc_transpiler_impl(ctx):
         fail("When declaration_dir is set, root_dir must also be set.")
 
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
-
-    root_dir = ctx.attr.root_dir.removesuffix("/")
-    if root_dir == ".":
-        root_dir = ""
-
+    root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
     predeclared = {f.short_path: f for f in ctx.outputs.js_outs + ctx.outputs.dts_outs + ctx.outputs.json_outs}
 
     js_outs = []  # JS files only, for the transpile action
@@ -301,19 +303,12 @@ _oxc_transpiler_rule = rule(
         "js_outs": attr.output_list(),
         "dts_outs": attr.output_list(),
         "json_outs": attr.output_list(),
-        "emit_json": attr.bool(
-            default = False,
-            doc = "Copy .json srcs into the output layout, like tsc's emit " +
-                  "under resolveJsonModule; set this when the tsconfig sets " +
-                  "resolveJsonModule. Without it json srcs produce no " +
-                  "outputs, matching tsc.",
-        ),
+        "root_dir": attr.string(),
         "out_dir": attr.string(),
         "declaration_dir": attr.string(
             doc = "Directory for the .d.ts outputs, like tsc's declarationDir. " +
                   "Defaults to out_dir.",
         ),
-        "root_dir": attr.string(),
         "emit_js": attr.bool(
             default = True,
             doc = "Emit JavaScript outputs.",
@@ -321,6 +316,13 @@ _oxc_transpiler_rule = rule(
         "emit_dts": attr.bool(
             default = False,
             doc = "Emit .d.ts declaration outputs.",
+        ),
+        "emit_json": attr.bool(
+            default = False,
+            doc = "Copy .json srcs into the output layout, like tsc's emit " +
+                  "under resolveJsonModule; set this when the tsconfig sets " +
+                  "resolveJsonModule. Without it json srcs produce no " +
+                  "outputs, matching tsc.",
         ),
         "source_maps": attr.bool(
             default = False,
@@ -352,23 +354,6 @@ _oxc_transpiler_rule = rule(
                 "esnext",
             ],
         ),
-        "helpers_module": attr.string(
-            doc = "Module to import runtime helpers from, defaulting to " +
-                  "@oxc-project/runtime. Transforms that need a helper always " +
-                  "import it, like tsc's importHelpers; oxc has no inline " +
-                  "helper mode, so tsc's default importHelpers=false behavior " +
-                  "cannot be reproduced. The helpers module must be a runtime " +
-                  "dependency whenever a transform emits helper imports (none " +
-                  "do in the default configuration).",
-        ),
-        "jsx": attr.string(
-            doc = "JSX runtime, using oxc's values. \"automatic\" (default) is " +
-                  "the automatic jsx-runtime transform, tsc's jsx=react-jsx. " +
-                  "\"classic\" compiles JSX to React.createElement calls, tsc's " +
-                  "jsx=react; providing React is the caller's concern. Map " +
-                  "tsc's jsx value spellings to oxc's manually.",
-            values = ["", "automatic", "classic"],
-        ),
         "module": attr.string(
             doc = "Module format of the JS outputs, using oxc's module values. " +
                   "\"preserve\" (default) keeps the input module syntax. " +
@@ -384,6 +369,14 @@ _oxc_transpiler_rule = rule(
                   "syntax in the sources is an error with \"commonjs\".",
             values = ["", "preserve", "esm", "commonjs"],
         ),
+        "jsx": attr.string(
+            doc = "JSX runtime, using oxc's values. \"automatic\" (default) is " +
+                  "the automatic jsx-runtime transform, tsc's jsx=react-jsx. " +
+                  "\"classic\" compiles JSX to React.createElement calls, tsc's " +
+                  "jsx=react; providing React is the caller's concern. Map " +
+                  "tsc's jsx value spellings to oxc's manually.",
+            values = ["", "automatic", "classic"],
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -394,6 +387,15 @@ _oxc_transpiler_rule = rule(
                   "limitations). Specifiers with other extensions (e.g. '.js') " +
                   "are left untouched.",
         ),
+        "helpers_module": attr.string(
+            doc = "Module to import runtime helpers from, defaulting to " +
+                  "@oxc-project/runtime. Transforms that need a helper always " +
+                  "import it, like tsc's importHelpers; oxc has no inline " +
+                  "helper mode, so tsc's default importHelpers=false behavior " +
+                  "cannot be reproduced. The helpers module must be a runtime " +
+                  "dependency whenever a transform emits helper imports (none " +
+                  "do in the default configuration).",
+        ),
         "_tool": attr.label(
             executable = True,
             default = "//oxc/private:transpiler",
@@ -403,40 +405,70 @@ _oxc_transpiler_rule = rule(
     toolchains = COPY_FILE_TOOLCHAINS,
 )
 
+def _clean_dir(path):
+    """Normalize a directory attribute: strip "./" and trailing slashes; "." is the package root."""
+    if not path:
+        return ""
+    path = path.removesuffix("/")
+    if path in ("", "."):
+        return "."
+    return path.removeprefix("./")
+
 def oxc_transpiler(
         name,
         srcs,
+        root_dir = "",
         out_dir = "",
         declaration_dir = "",
-        root_dir = "",
         emit_js = True,
         emit_dts = False,
-        source_maps = False,
-        rewrite_extensions = False,
-        target = "",
-        helpers_module = "",
-        jsx = "",
-        module = "",
         emit_json = False,
+        source_maps = False,
+        target = "",
+        module = "",
+        jsx = "",
+        rewrite_extensions = False,
+        helpers_module = "",
         **kwargs):
-    """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
+    """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
+
+    Args:
+        name: target name.
+        srcs: sources to transpile; files or targets carrying JsInfo.
+        root_dir: directory the srcs are relative to when computing output paths.
+        out_dir: directory for the JS outputs, relative to the package.
+        declaration_dir: directory for the declaration outputs, defaulting to out_dir.
+        emit_js: emit JavaScript outputs.
+        emit_dts: emit .d.ts declaration outputs.
+        emit_json: copy .json srcs into the output layout.
+        source_maps: emit a .map file alongside each JS output.
+        target: ECMAScript target to downlevel the JS outputs to.
+        module: module format of the JS outputs.
+        jsx: JSX runtime, "automatic" or "classic".
+        rewrite_extensions: rewrite .ts-style import extensions to their JS extension.
+        helpers_module: module to import runtime helpers from.
+        **kwargs: common attributes forwarded to the rule.
+    """
+    out_dir = _clean_dir(out_dir)
+    declaration_dir = _clean_dir(declaration_dir)
+    root_dir = _clean_dir(root_dir)
     _oxc_transpiler_rule(
         name = name,
         srcs = srcs,
-        js_outs = _calculate_outs(srcs, _to_js_out, out_dir or "", root_dir or "") if emit_js else [],
-        dts_outs = _calculate_outs(srcs, _to_dts_out, declaration_dir or out_dir or "", root_dir or "") if emit_dts else [],
-        json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js and emit_json else [],
-        out_dir = out_dir or "",
-        declaration_dir = declaration_dir or "",
-        root_dir = root_dir or "",
+        js_outs = _calculate_outs(srcs, _to_js_out, out_dir, root_dir) if emit_js else [],
+        dts_outs = _calculate_outs(srcs, _to_dts_out, declaration_dir or out_dir, root_dir) if emit_dts else [],
+        json_outs = _calculate_outs(srcs, _to_json_out, out_dir, root_dir) if emit_js and emit_json else [],
+        root_dir = root_dir,
+        out_dir = out_dir,
+        declaration_dir = declaration_dir,
         emit_js = emit_js,
         emit_dts = emit_dts,
+        emit_json = emit_json or False,
         source_maps = source_maps or False,
+        target = target or "",
+        module = module or "",
         jsx = jsx or "",
         rewrite_extensions = rewrite_extensions or False,
-        target = target or "",
         helpers_module = helpers_module or "",
-        module = module or "",
-        emit_json = emit_json or False,
         **kwargs
     )

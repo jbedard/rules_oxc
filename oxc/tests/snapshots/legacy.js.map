@@ -1,0 +1,1 @@
+{"version":3,"names":[],"sources":["oxc/tests/src/legacy.js"],"sourcesContent":["import { double } from \"./util\";\n\nexport const four = double(2);\n"],"mappings":"AAAA,SAAS,cAAc;AAEvB,OAAO,MAAM,OAAO,OAAO,CAAC"}

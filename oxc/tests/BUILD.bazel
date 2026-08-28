@@ -1,6 +1,7 @@
 load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@bazel_skylib//rules:select_file.bzl", "select_file")
 load("//oxc:defs.bzl", "oxc_transpiler")
 
 package(default_testonly = True)
@@ -46,8 +47,9 @@ diff_test(
     file2 = "snapshots/main.js",
 )
 
-# The "src/*.ts" glob also matches src/types.d.ts: declaration sources are
-# skipped by the rule and must not break the build or produce outputs.
+# The "src/*.ts", "src/*.mts" and "src/*.cts" globs also match the
+# src/types.d.* declaration sources: those are skipped by the rule and must
+# not break the build or produce outputs.
 oxc_transpiler(
     name = "transpile",
     srcs = glob([
@@ -57,8 +59,13 @@ oxc_transpiler(
         "src/*.cts",
         "src/*.js",
         "src/*.jsx",
+        "src/*.mjs",
+        "src/*.cjs",
         "src/*.json",
         "src/sub/*.ts",
+        "src/nested/**/*.ts",
+        "src/nested/**/*.js",
+        "src/nested/**/*.json",
     ]),
     emit_dts = True,
     emit_json = True,
@@ -82,9 +89,60 @@ build_test(
         "dist/mod.cjs",
         "dist/mod.d.cts",
         "dist/data.json",
+        "dist/plain.mjs",
+        "dist/plain.cjs",
+        "dist/modern.js",
+        "dist/modern.d.ts",
         "dist/sub/index.js",
+        "dist/sub/index.d.ts",
+        "dist/nested/branch.js",
+        "dist/nested/branch.d.ts",
+        "dist/nested/deep/leaf.js",
+        "dist/nested/deep/leaf.d.ts",
+        "dist/nested/deep/plain.js",
+        "dist/nested/deep/data.json",
         "dist/uses_index.js",
     ],
+)
+
+# Nested subdirectories keep their layout under out_dir; relative imports
+# across levels are emitted verbatim.
+diff_test(
+    name = "js_nested_leaf_test",
+    file1 = "dist/nested/deep/leaf.js",
+    file2 = "snapshots/nested/deep/leaf.js",
+)
+
+diff_test(
+    name = "dts_nested_leaf_test",
+    file1 = "dist/nested/deep/leaf.d.ts",
+    file2 = "snapshots/nested/deep/leaf.d.ts",
+)
+
+diff_test(
+    name = "json_nested_test",
+    file1 = "dist/nested/deep/data.json",
+    file2 = "src/nested/deep/data.json",
+)
+
+# Plain .mjs/.cjs sources keep their extension and, like .js, produce no
+# declarations even with emit_dts.
+diff_test(
+    name = "js_plain_mjs_test",
+    file1 = "dist/plain.mjs",
+    file2 = "snapshots/plain.mjs",
+)
+
+diff_test(
+    name = "js_plain_cjs_test",
+    file1 = "dist/plain.cjs",
+    file2 = "snapshots/plain.cjs",
+)
+
+diff_test(
+    name = "dts_modern_test",
+    file1 = "dist/modern.d.ts",
+    file2 = "snapshots/modern.d.ts",
 )
 
 # JSON sources are copied through unchanged under emit_json.
@@ -270,6 +328,7 @@ oxc_transpiler(
     srcs = [
         "src/component.tsx",
         "src/main.ts",
+        "src/nested/deep/leaf.ts",
         "src/util.mts",
         "src/widget.jsx",
     ],
@@ -281,6 +340,8 @@ build_test(
     targets = [
         "src/main.js",
         "src/main.d.ts",
+        "src/nested/deep/leaf.js",
+        "src/nested/deep/leaf.d.ts",
         "src/util.mjs",
         "src/util.d.mts",
         "src/component.js",
@@ -302,6 +363,12 @@ diff_test(
 )
 
 diff_test(
+    name = "js_nested_in_place_test",
+    file1 = "src/nested/deep/leaf.js",
+    file2 = "snapshots/nested/deep/leaf.js",
+)
+
+diff_test(
     name = "js_widget_in_place_test",
     file1 = "src/widget.js",
     file2 = "snapshots/widget.js",
@@ -310,7 +377,10 @@ diff_test(
 # root_dir without out_dir: outputs land at the package root.
 oxc_transpiler(
     name = "transpile_root_dir_only",
-    srcs = ["src/main.ts"],
+    srcs = [
+        "src/main.ts",
+        "src/nested/deep/leaf.ts",
+    ],
     emit_dts = True,
     root_dir = "src",
 )
@@ -320,13 +390,49 @@ build_test(
     targets = [
         "main.js",
         "main.d.ts",
+        "nested/deep/leaf.js",
+        "nested/deep/leaf.d.ts",
     ],
+)
+
+diff_test(
+    name = "js_root_dir_only_nested_test",
+    file1 = "nested/deep/leaf.js",
+    file2 = "snapshots/nested/deep/leaf.js",
 )
 
 diff_test(
     name = "js_root_dir_only_test",
     file1 = "main.js",
     file2 = "snapshots/main.js",
+)
+
+# root_dir at a nested directory: only the part below it is kept.
+oxc_transpiler(
+    name = "transpile_nested_root_dir",
+    srcs = [
+        "src/nested/branch.ts",
+        "src/nested/deep/leaf.ts",
+    ],
+    emit_dts = True,
+    out_dir = "nestedroot",
+    root_dir = "src/nested",
+)
+
+build_test(
+    name = "nested_root_dir_outputs_test",
+    targets = [
+        "nestedroot/branch.js",
+        "nestedroot/branch.d.ts",
+        "nestedroot/deep/leaf.js",
+        "nestedroot/deep/leaf.d.ts",
+    ],
+)
+
+diff_test(
+    name = "js_nested_root_dir_test",
+    file1 = "nestedroot/deep/leaf.js",
+    file2 = "snapshots/nested/deep/leaf.js",
 )
 
 # emit_js = False: only declarations are emitted, and DefaultInfo falls back
@@ -570,4 +676,355 @@ diff_test(
     name = "module_esm_test",
     file1 = "esmout/main.js",
     file2 = "snapshots/main.js",
+)
+
+# emit_js = False with plain JS srcs: they have no declarations to emit, so they
+# produce no outputs and no transpile entry, without breaking the build.
+oxc_transpiler(
+    name = "transpile_dts_only_plain_js",
+    srcs = [
+        "src/legacy.js",
+        "src/main.ts",
+        "src/plain.cjs",
+        "src/widget.jsx",
+    ],
+    emit_dts = True,
+    emit_js = False,
+    out_dir = "dtsonlyjs",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "dts_only_plain_js_test",
+    file1 = "dtsonlyjs/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)
+
+# emit_json only applies to the JS emit: with emit_js = False the json src is
+# skipped, so the target's default outputs are exactly the declarations.
+oxc_transpiler(
+    name = "transpile_dts_only_json",
+    srcs = [
+        "src/data.json",
+        "src/main.ts",
+    ],
+    emit_dts = True,
+    emit_js = False,
+    emit_json = True,
+    out_dir = "dtsonlyjson",
+    root_dir = "src",
+)
+
+select_file(
+    name = "dts_only_json_outputs",
+    srcs = ":transpile_dts_only_json",
+    subpath = "dtsonlyjson/main.d.ts",
+)
+
+diff_test(
+    name = "dts_only_json_test",
+    file1 = ":dts_only_json_outputs",
+    file2 = "snapshots/main.d.ts",
+)
+
+# source_maps across the module variants, plain JS, a nested src and with
+# emit_dts: every JS output gets a sibling .map named after its emitted
+# extension (util.mjs.map), declarations get none. The .map files are not
+# pre-declared, so they are selected from the target's outputs.
+oxc_transpiler(
+    name = "transpile_source_maps_all",
+    srcs = [
+        "src/legacy.js",
+        "src/main.ts",
+        "src/nested/deep/leaf.ts",
+        "src/sub/index.ts",
+        "src/util.mts",
+        "src/widget.jsx",
+    ],
+    emit_dts = True,
+    out_dir = "mapsall",
+    root_dir = "src",
+    source_maps = True,
+)
+
+build_test(
+    name = "source_maps_all_test",
+    targets = [":transpile_source_maps_all"],
+)
+
+diff_test(
+    name = "js_source_maps_all_test",
+    file1 = "mapsall/main.js",
+    file2 = "snapshots/main_with_map.js",
+)
+
+diff_test(
+    name = "dts_source_maps_all_test",
+    file1 = "mapsall/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)
+
+[
+    (
+        select_file(
+            name = "source_maps_all_" + name.replace(".", "_"),
+            srcs = ":transpile_source_maps_all",
+            subpath = "mapsall/" + name,
+        ),
+        diff_test(
+            name = "source_maps_all_" + name.replace(".", "_") + "_test",
+            file1 = ":source_maps_all_" + name.replace(".", "_"),
+            file2 = "snapshots/" + name,
+        ),
+    )
+    for name in [
+        "main.js.map",
+        "util.mjs.map",
+        "legacy.js.map",
+        "sub/index.js.map",
+        "nested/deep/leaf.js.map",
+    ]
+]
+
+# target only downlevels the JS: the declarations are identical to those of an
+# untargeted build.
+oxc_transpiler(
+    name = "transpile_target_es2015_dts",
+    srcs = ["src/modern.ts"],
+    emit_dts = True,
+    out_dir = "targetdts",
+    root_dir = "src",
+    target = "es2015",
+)
+
+diff_test(
+    name = "target_es2015_dts_js_test",
+    file1 = "targetdts/modern.js",
+    file2 = "snapshots/modern_es2015.js",
+)
+
+diff_test(
+    name = "target_es2015_dts_test",
+    file1 = "targetdts/modern.d.ts",
+    file2 = "snapshots/modern.d.ts",
+)
+
+# jsx = "automatic" spelled out is the default: same output as leaving it unset.
+oxc_transpiler(
+    name = "transpile_jsx_automatic",
+    srcs = ["src/component.tsx"],
+    jsx = "automatic",
+    out_dir = "autojsx",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "jsx_automatic_test",
+    file1 = "autojsx/component.js",
+    file2 = "snapshots/component.js",
+)
+
+# module = "preserve" spelled out is the default: ESM and TypeScript's
+# CommonJS-specific syntax both pass through as they do when unset.
+oxc_transpiler(
+    name = "transpile_module_preserve",
+    srcs = [
+        "src/main.ts",
+        "src/mod.cts",
+    ],
+    module = "preserve",
+    out_dir = "preserve",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "module_preserve_test",
+    file1 = "preserve/main.js",
+    file2 = "snapshots/main.js",
+)
+
+diff_test(
+    name = "module_preserve_cts_test",
+    file1 = "preserve/mod.cjs",
+    file2 = "snapshots/mod.cjs",
+)
+
+# declaration_dir with nested srcs and emit_json: the src-relative layout is
+# kept under both directories, and json is copied under out_dir only.
+oxc_transpiler(
+    name = "transpile_declaration_dir_nested",
+    srcs = [
+        "src/data.json",
+        "src/main.ts",
+        "src/nested/deep/data.json",
+        "src/nested/deep/leaf.ts",
+        "src/sub/index.ts",
+    ],
+    declaration_dir = "ddnested/types",
+    emit_dts = True,
+    emit_json = True,
+    out_dir = "ddnested/code",
+    root_dir = "src",
+)
+
+build_test(
+    name = "declaration_dir_nested_outputs_test",
+    targets = [
+        "ddnested/code/main.js",
+        "ddnested/code/sub/index.js",
+        "ddnested/code/data.json",
+        "ddnested/types/main.d.ts",
+        "ddnested/types/sub/index.d.ts",
+        "ddnested/code/nested/deep/leaf.js",
+        "ddnested/code/nested/deep/data.json",
+        "ddnested/types/nested/deep/leaf.d.ts",
+    ],
+)
+
+diff_test(
+    name = "declaration_dir_nested_deep_dts_test",
+    file1 = "ddnested/types/nested/deep/leaf.d.ts",
+    file2 = "snapshots/nested/deep/leaf.d.ts",
+)
+
+diff_test(
+    name = "declaration_dir_nested_json_test",
+    file1 = "ddnested/code/data.json",
+    file2 = "src/data.json",
+)
+
+diff_test(
+    name = "declaration_dir_nested_dts_test",
+    file1 = "ddnested/types/main.d.ts",
+    file2 = "snapshots/main.d.ts",
+)
+
+# root_dir spelled with a trailing slash is normalized like ts_project's.
+oxc_transpiler(
+    name = "transpile_root_dir_slash",
+    srcs = ["src/main.ts"],
+    emit_dts = True,
+    out_dir = "rdslash",
+    root_dir = "src/",
+)
+
+build_test(
+    name = "root_dir_slash_outputs_test",
+    targets = [
+        "rdslash/main.js",
+        "rdslash/main.d.ts",
+    ],
+)
+
+diff_test(
+    name = "js_root_dir_slash_test",
+    file1 = "rdslash/main.js",
+    file2 = "snapshots/main.js",
+)
+
+# root_dir = "." is the package root: outputs keep the src/ prefix under out_dir.
+oxc_transpiler(
+    name = "transpile_root_dir_dot",
+    srcs = ["src/main.ts"],
+    out_dir = "rddot",
+    root_dir = ".",
+)
+
+build_test(
+    name = "root_dir_dot_outputs_test",
+    targets = ["rddot/src/main.js"],
+)
+
+diff_test(
+    name = "js_root_dir_dot_test",
+    file1 = "rddot/src/main.js",
+    file2 = "snapshots/main.js",
+)
+
+# srcs given as labels rather than paths: the package prefix is stripped when
+# computing the pre-declared outputs.
+oxc_transpiler(
+    name = "transpile_label_srcs",
+    srcs = [
+        ":src/main.ts",
+        "//oxc/tests:src/util.mts",
+    ],
+    emit_dts = True,
+    out_dir = "labels",
+    root_dir = "src",
+)
+
+build_test(
+    name = "label_srcs_outputs_test",
+    targets = [
+        "labels/main.js",
+        "labels/main.d.ts",
+        "labels/util.mjs",
+        "labels/util.d.mts",
+    ],
+)
+
+diff_test(
+    name = "js_label_srcs_test",
+    file1 = "labels/util.mjs",
+    file2 = "snapshots/util.mjs",
+)
+
+# A src already inside out_dir keeps its path, like ts_project; the others are
+# relocated under out_dir as usual.
+oxc_transpiler(
+    name = "transpile_src_in_out_dir",
+    srcs = [
+        "src/in_out/inner.ts",
+        "src/main.ts",
+    ],
+    emit_dts = True,
+    out_dir = "src/in_out",
+    root_dir = "src",
+)
+
+build_test(
+    name = "src_in_out_dir_outputs_test",
+    targets = [
+        "src/in_out/inner.js",
+        "src/in_out/inner.d.ts",
+        "src/in_out/main.js",
+        "src/in_out/main.d.ts",
+    ],
+)
+
+diff_test(
+    name = "js_src_in_out_dir_test",
+    file1 = "src/in_out/main.js",
+    file2 = "snapshots/main.js",
+)
+
+# A json src that only becomes known at analysis time (via a target) is copied
+# too; its output is declared then rather than pre-declared.
+filegroup(
+    name = "json_srcs",
+    srcs = ["src/data.json"],
+)
+
+oxc_transpiler(
+    name = "transpile_json_target",
+    srcs = [
+        "src/main.ts",
+        ":json_srcs",
+    ],
+    emit_json = True,
+    out_dir = "jsontarget",
+    root_dir = "src",
+)
+
+select_file(
+    name = "json_target_output",
+    srcs = ":transpile_json_target",
+    subpath = "jsontarget/data.json",
+)
+
+diff_test(
+    name = "json_target_test",
+    file1 = ":json_target_output",
+    file2 = "src/data.json",
 )

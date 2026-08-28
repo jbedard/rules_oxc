@@ -16,7 +16,10 @@ package(default_testonly = True)
 # target's "types" output group without creating another transpile action.
 ts_project(
     name = "ts",
-    srcs = ["src/main.ts"],
+    srcs = [
+        "src/main.ts",
+        "src/nested/deep/leaf.ts",
+    ],
     declaration = True,
     declaration_transpiler = oxc_transpiler_declarations,
     out_dir = "dist",
@@ -35,6 +38,8 @@ build_test(
     targets = [
         ":ts",
         ":ts_types",
+        "dist/nested/deep/leaf.js",
+        "dist/nested/deep/leaf.d.ts",
     ],
 )
 
@@ -49,4 +54,16 @@ diff_test(
     name = "dts_test",
     file1 = "dist/main.d.ts",
     file2 = "snapshots/main.d.ts",
+)
+
+diff_test(
+    name = "nested_js_test",
+    file1 = "dist/nested/deep/leaf.js",
+    file2 = "snapshots/nested/deep/leaf.js",
+)
+
+diff_test(
+    name = "nested_dts_test",
+    file1 = "dist/nested/deep/leaf.d.ts",
+    file2 = "snapshots/nested/deep/leaf.d.ts",
 )

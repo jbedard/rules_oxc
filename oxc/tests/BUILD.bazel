@@ -772,6 +772,61 @@ diff_test(
     file2 = "importselided/imports.d.ts",
 )
 
+# strip_internal omits `/** @internal */` declarations from the .d.ts outputs,
+# like tsc's stripInternal; the JS output keeps them.
+oxc_transpiler(
+    name = "transpile_internal_kept",
+    srcs = ["src/internal.ts"],
+    emit_dts = True,
+    out_dir = "internalkept",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "internal_kept_dts_test",
+    file1 = "internalkept/internal.d.ts",
+    file2 = "snapshots/internal.d.ts",
+)
+
+oxc_transpiler(
+    name = "transpile_strip_internal",
+    srcs = ["src/internal.ts"],
+    emit_dts = True,
+    out_dir = "stripinternal",
+    root_dir = "src",
+    strip_internal = True,
+)
+
+diff_test(
+    name = "strip_internal_dts_test",
+    file1 = "stripinternal/internal.d.ts",
+    file2 = "snapshots/internal_stripped.d.ts",
+)
+
+diff_test(
+    name = "strip_internal_js_test",
+    file1 = "stripinternal/internal.js",
+    file2 = "internalkept/internal.js",
+)
+
+# strip_internal with emit_js = False: the shape of a ts_project
+# declaration_transpiler, where only the declarations are emitted.
+oxc_transpiler(
+    name = "transpile_strip_internal_dts_only",
+    srcs = ["src/internal.ts"],
+    emit_dts = True,
+    emit_js = False,
+    out_dir = "stripinternaldts",
+    root_dir = "src",
+    strip_internal = True,
+)
+
+diff_test(
+    name = "strip_internal_dts_only_test",
+    file1 = "stripinternaldts/internal.d.ts",
+    file2 = "snapshots/internal_stripped.d.ts",
+)
+
 # module = "commonjs": TypeScript's CommonJS-specific syntax is rewritten (`export =` to
 # module.exports, `import x = require(...)` to a require call) and "use strict" is added. ESM
 # syntax in srcs would be an error: oxc has no ESM-to-CommonJS transform.

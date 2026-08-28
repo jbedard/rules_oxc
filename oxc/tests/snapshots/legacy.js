@@ -1,2 +1,2 @@
-import { double } from "./util.mjs";
+import { double } from "./util";
 export const four = double(2);

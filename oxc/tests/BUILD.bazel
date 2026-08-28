@@ -187,7 +187,7 @@ diff_test(
     file2 = "snapshots/mod.d.cts",
 )
 
-# Extensionless import of a directory resolves to its index file.
+# Extensionless import specifiers are emitted verbatim, like tsc.
 diff_test(
     name = "js_uses_index_test",
     file1 = "dist/uses_index.js",

@@ -1,1 +1,1 @@
-export { subValue } from "./sub/index.js";
+export { subValue } from "./sub";

@@ -731,6 +731,47 @@ diff_test(
     file2 = "snapshots/fields_assign_esnext.js",
 )
 
+# Without verbatim_module_syntax an import is elided when none of its bindings
+# survive type stripping: `double` is only used in a type position, so "./util"
+# is dropped along with the `type` imports and exports. A bare side-effect
+# import is kept either way.
+oxc_transpiler(
+    name = "transpile_imports_elided",
+    srcs = ["src/imports.ts"],
+    emit_dts = True,
+    out_dir = "importselided",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "imports_elided_test",
+    file1 = "importselided/imports.js",
+    file2 = "snapshots/imports_elided.js",
+)
+
+# With verbatim_module_syntax only `type` imports and exports are removed:
+# "./util" is kept for its side effects, mirroring tsc's verbatimModuleSyntax.
+oxc_transpiler(
+    name = "transpile_verbatim_module_syntax",
+    srcs = ["src/imports.ts"],
+    emit_dts = True,
+    out_dir = "verbatim",
+    root_dir = "src",
+    verbatim_module_syntax = True,
+)
+
+diff_test(
+    name = "verbatim_module_syntax_test",
+    file1 = "verbatim/imports.js",
+    file2 = "snapshots/imports_verbatim.js",
+)
+
+diff_test(
+    name = "verbatim_module_syntax_dts_test",
+    file1 = "verbatim/imports.d.ts",
+    file2 = "importselided/imports.d.ts",
+)
+
 # module = "commonjs": TypeScript's CommonJS-specific syntax is rewritten (`export =` to
 # module.exports, `import x = require(...)` to a require call) and "use strict" is added. ESM
 # syntax in srcs would be an error: oxc has no ESM-to-CommonJS transform.

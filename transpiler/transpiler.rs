@@ -87,12 +87,6 @@ struct Entry {
     dts_out: Option<String>,
 }
 
-struct Output {
-    path: String,
-    code: String,
-    map: Option<String>,
-}
-
 fn main() {
     if let Err(errors) = run(std::env::args().skip(1)) {
         for error in &errors {
@@ -114,8 +108,7 @@ fn flag_value(
 fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     let Cli { options, manifest_path, positional } = parse_args(args)?;
     let entries = read_entries(&options, manifest_path, positional)?;
-    let outputs = transpile_entries(&options, &entries)?;
-    write_outputs(outputs)
+    transpile_entries(&options, &entries)
 }
 
 const SUPPORTED_TARGETS: [&str; 14] = [
@@ -272,11 +265,11 @@ fn read_entries(
         .collect())
 }
 
-// Transpiles every entry, collecting the outputs to write; a failed entry adds its errors and
-// drops its outputs, so all failing entries are reported in one pass.
-fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>, Vec<String>> {
+// Transpiles and writes every entry in turn. Failures do not prevent later entries from being
+// processed, so all errors are reported in one pass. Outputs from entries that completed before
+// a failure are intentionally retained rather than buffering every generated file in memory.
+fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<(), Vec<String>> {
     let mut all_errors: Vec<String> = Vec::new();
-    let mut outputs: Vec<Output> = Vec::new();
 
     for entry in entries {
         let content = match fs::read_to_string(&entry.src) {
@@ -307,10 +300,14 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>
             continue;
         }
         if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
-            outputs.push(Output { path: js_out.clone(), code, map: result.js_map });
+            if let Err(e) = write_output(js_out, &code, result.js_map.as_deref()) {
+                all_errors.push(format!("error: cannot write {js_out}: {e}"));
+            }
         }
         if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
-            outputs.push(Output { path: dts_out.clone(), code, map: None });
+            if let Err(e) = write_output(dts_out, &code, None) {
+                all_errors.push(format!("error: cannot write {dts_out}: {e}"));
+            }
         }
     }
 
@@ -318,27 +315,17 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>
         return Err(all_errors);
     }
 
-    Ok(outputs)
+    Ok(())
 }
 
-fn write_outputs(outputs: Vec<Output>) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-    for output in &outputs {
-        if let Err(e) = write_output(output) {
-            errors.push(format!("error: cannot write {}: {e}", output.path));
-        }
-    }
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
-}
-
-fn write_output(output: &Output) -> std::io::Result<()> {
-    let out = Path::new(&output.path);
+fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()> {
+    let out = Path::new(path);
     let mut file = fs::File::create(out)?;
-    file.write_all(output.code.as_bytes())?;
-    if let Some(map) = &output.map {
+    file.write_all(code.as_bytes())?;
+    if let Some(map) = map {
         let name = out.file_name().ok_or_else(|| std::io::Error::other("path has no file name"))?;
         write!(file, "\n//# sourceMappingURL={}.map", name.to_string_lossy())?;
-        fs::write(format!("{}.map", output.path), map)?;
+        fs::write(format!("{path}.map"), map)?;
     }
     Ok(())
 }
@@ -1472,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn run_aggregates_errors_across_entries() {
+    fn run_writes_successful_entries_while_aggregating_errors() {
         let dir = test_dir("run_error_aggregation");
         let bad1 = dir.join("bad1.ts");
         let bad2 = dir.join("bad2.ts");
@@ -1491,9 +1478,37 @@ mod tests {
             good_out.to_str().unwrap(),
         ]))
         .unwrap_err();
-        // Both failing entries are reported, and no outputs are written.
+        // Both failing entries are reported, while successful entries are written immediately.
         assert!(err.len() >= 2, "errors: {err:?}");
-        assert!(!good_out.exists());
+        assert!(good_out.exists());
+    }
+
+    #[test]
+    fn run_writes_js_maps_and_declarations_before_later_errors() {
+        let dir = test_dir("run_streams_all_output_kinds");
+        let good = dir.join("good.ts");
+        let bad = dir.join("bad.ts");
+        fs::write(&good, "export const x: number = 1;\n").unwrap();
+        fs::write(&bad, "const = ;").unwrap();
+        let js_out = dir.join("out/good.js");
+        let dts_out = dir.join("out/good.d.ts");
+        let err = run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            "--source-maps",
+            good.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+            dts_out.to_str().unwrap(),
+            bad.to_str().unwrap(),
+            dir.join("out/bad.js").to_str().unwrap(),
+            dir.join("out/bad.d.ts").to_str().unwrap(),
+        ]))
+        .unwrap_err();
+
+        assert!(!err.is_empty(), "errors: {err:?}");
+        assert!(js_out.exists());
+        assert!(js_out.with_extension("js.map").exists());
+        assert!(dts_out.exists());
     }
 
     // A write failure is reported as an error like any other, not a panic.

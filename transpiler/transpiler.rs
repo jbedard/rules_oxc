@@ -18,6 +18,7 @@ use oxc::transformer::{
     RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 
@@ -332,17 +333,12 @@ fn write_outputs(outputs: Vec<Output>) -> Result<(), Vec<String>> {
 
 fn write_output(output: &Output) -> std::io::Result<()> {
     let out = Path::new(&output.path);
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let mut file = fs::File::create(out)?;
+    file.write_all(output.code.as_bytes())?;
     if let Some(map) = &output.map {
         let name = out.file_name().ok_or_else(|| std::io::Error::other("path has no file name"))?;
-        let map_basename = name.to_string_lossy();
-        let code = format!("{}\n//# sourceMappingURL={map_basename}.map", output.code);
-        fs::write(out, code)?;
+        write!(file, "\n//# sourceMappingURL={}.map", name.to_string_lossy())?;
         fs::write(format!("{}.map", output.path), map)?;
-    } else {
-        fs::write(out, &output.code)?;
     }
     Ok(())
 }
@@ -594,7 +590,8 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let dir = base.join(name);
-        fs::create_dir_all(&dir).unwrap();
+        // Outputs go under out/, created up front like Bazel does for declared outputs.
+        fs::create_dir_all(dir.join("out")).unwrap();
         dir
     }
 
@@ -1512,6 +1509,19 @@ mod tests {
         let err =
             run(args(&["--emit-js", src.to_str().unwrap(), out.to_str().unwrap()])).unwrap_err();
         assert!(err[0].starts_with("error: cannot write"), "{err:?}");
+    }
+
+    // Output parent directories are Bazel's job; a missing one is an error, not created.
+    #[test]
+    fn run_does_not_create_output_directories() {
+        let dir = test_dir("run_missing_output_dir");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let out = dir.join("missing/a.js");
+        let err =
+            run(args(&["--emit-js", src.to_str().unwrap(), out.to_str().unwrap()])).unwrap_err();
+        assert!(err[0].starts_with("error: cannot write"), "{err:?}");
+        assert!(!dir.join("missing").exists());
     }
 
     // An unreadable source is reported alongside other entries' errors instead of aborting the pass.

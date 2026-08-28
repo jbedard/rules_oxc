@@ -11,12 +11,22 @@ js_library(
     srcs = ["src/legacy.js"],
 )
 
+# Sources only known at analysis time are transpiled like file srcs, with
+# outputs declared then rather than pre-declared. The nested src lands in an
+# output directory that only exists because Bazel creates it for the declared
+# output: the transpiler does not create it.
+filegroup(
+    name = "sub_srcs",
+    srcs = ["src/sub/index.ts"],
+)
+
 oxc_transpiler(
     name = "transpile_target_srcs",
     srcs = [
         "src/main.ts",
         "src/util.mts",
         ":legacy_lib",
+        ":sub_srcs",
     ],
     out_dir = "targetsrcs",
     root_dir = "src",

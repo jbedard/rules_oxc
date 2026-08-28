@@ -12,6 +12,15 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
 - `declarations_only` - `emit_declaration_only` with oxc producing only
   declaration outputs.
 - `tsc_declarations` - oxc produces JavaScript while tsc emits declarations.
+- `declaration_dir` - declarations written to a separate `declaration_dir`.
+- `source_maps` - `source_map` mirrored by `source_maps` on the transpiler.
+- `resolve_json_module` - `resolve_json_module` mirrored by `emit_json`.
+- `target` - tsconfig `target` mirrored by `target`, downleveling the JS.
+- `jsx_classic` - tsconfig `jsx: react` mirrored by `jsx = "classic"`.
+- `rewrite_extensions` - tsconfig `rewriteRelativeImportExtensions` mirrored
+  by `rewrite_extensions`.
+- `module_commonjs` - tsconfig `module: commonjs` mirrored by
+  `module = "commonjs"` for `.cts` sources.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

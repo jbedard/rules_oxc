@@ -123,6 +123,11 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     write_outputs(outputs)
 }
 
+const SUPPORTED_TARGETS: [&str; 14] = [
+    "es6", "es2015", "es2016", "es2017", "es2018", "es2019", "es2020", "es2021", "es2022",
+    "es2023", "es2024", "es2025", "es2026", "esnext",
+];
+
 struct Cli {
     options: Options,
     manifest_path: Option<String>,
@@ -168,6 +173,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--only-remove-type-imports" => cli.options.only_remove_type_imports = true,
             "--target" => {
                 let target = flag_value(&mut args, &arg, "a value")?;
+                // Repeats the Bazel rule's attr allowlist: only whole ES versions that oxc can
+                // fully downlevel to. Rejects es5 (oxc cannot fully downlevel ES2015 syntax) and
+                // engine/browserslist targets, which EnvOptions::from_target would accept.
+                if !SUPPORTED_TARGETS.contains(&target.as_str()) {
+                    return Err(vec![format!(
+                        "error: unsupported --target \"{target}\": expected es6, es2015..es2026, or esnext"
+                    )]);
+                }
                 cli.options.env = Some(
                     EnvOptions::from_target(&target)
                         .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
@@ -712,8 +725,26 @@ mod tests {
 
     #[test]
     fn run_reports_invalid_target() {
-        let err = run(args(&["--emit-js", "--target", "es1999"])).unwrap_err();
-        assert!(err[0].starts_with("error: invalid --target \"es1999\""), "{err:?}");
+        for target in ["es1999", "es5", "chrome58", "node20", "es2015,chrome58"] {
+            let err = run(args(&["--emit-js", "--target", target])).unwrap_err();
+            assert!(
+                err[0].starts_with(&format!("error: unsupported --target \"{target}\"")),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_accepts_supported_targets() {
+        for target in SUPPORTED_TARGETS {
+            let err = run(args(&["--target", target])).unwrap_err();
+            // Parsing succeeds; the error is the unrelated missing-emit check.
+            assert_eq!(
+                err,
+                vec!["error: at least one of --emit-js or --emit-dts is required".to_string()],
+                "target {target}"
+            );
+        }
     }
 
     #[test]

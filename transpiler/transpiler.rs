@@ -20,10 +20,13 @@ use oxc::transformer::{
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 
 #[derive(Clone)]
 struct Options {
+    cpus: usize,
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
@@ -63,6 +66,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            cpus: 1,
             emit_js: false,
             emit_dts: false,
             source_maps: false,
@@ -134,6 +138,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--emit-js" => cli.options.emit_js = true,
             "--emit-dts" => cli.options.emit_dts = true,
             "--source-maps" => cli.options.source_maps = true,
+            "--cpus" => {
+                let value = flag_value(&mut args, &arg, "a positive integer")?;
+                cli.options.cpus = value
+                    .parse()
+                    .ok()
+                    .filter(|cpus: &usize| *cpus > 0)
+                    .ok_or_else(|| {
+                        vec![format!("error: --cpus must be a positive integer, got \"{value}\"")]
+                    })?;
+            }
             "--jsx" => {
                 let value = flag_value(&mut args, &arg, "a value")?;
                 cli.options.jsx = match value.as_str() {
@@ -265,57 +279,72 @@ fn read_entries(
         .collect())
 }
 
-// Transpiles and writes every entry in turn. Failures do not prevent later entries from being
-// processed, so all errors are reported in one pass. Outputs from entries that completed before
-// a failure are intentionally retained rather than buffering every generated file in memory.
+// Transpiles and writes every entry, with up to --cpus entries in flight at once. Failures do
+// not prevent other entries from being processed, so all errors are reported in one pass, in
+// manifest order. Outputs from entries that completed before a failure are intentionally
+// retained rather than buffering every generated file in memory.
 fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<(), Vec<String>> {
-    let mut all_errors: Vec<String> = Vec::new();
+    let next = AtomicUsize::new(0);
+    let mut errors: Vec<(usize, Vec<String>)> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..options.cpus.min(entries.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut errors = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = entries.get(i) else { break errors };
+                        let entry_errors = transpile_entry(options, entry);
+                        if !entry_errors.is_empty() {
+                            errors.push((i, entry_errors));
+                        }
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|worker| worker.join().unwrap()).collect()
+    });
+    errors.sort_by_key(|(i, _)| *i);
 
-    for entry in entries {
-        let content = match fs::read_to_string(&entry.src) {
-            Ok(content) => content,
-            Err(e) => {
-                all_errors.push(format!("error: cannot read {}: {e}", entry.src));
-                continue;
-            }
-        };
+    let all_errors: Vec<String> = errors.into_iter().flat_map(|(_, e)| e).collect();
+    if all_errors.is_empty() { Ok(()) } else { Err(all_errors) }
+}
 
-        // Declaration files have nothing to transpile and, matching tsc, are never emitted.
-        if is_declaration_file(&entry.src) {
-            all_errors.push(format!(
-                "error: declaration file \"{}\" produces no outputs and cannot be a transpile entry",
-                entry.src
-            ));
-            continue;
-        }
+fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
+    let content = match fs::read_to_string(&entry.src) {
+        Ok(content) => content,
+        Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
+    };
 
-        let entry_options = Options {
-            emit_js: entry.js_out.is_some(),
-            emit_dts: entry.dts_out.is_some(),
-            ..options.clone()
-        };
-        let result = transpile(&entry.src, &content, &entry_options);
-        if !result.errors.is_empty() {
-            all_errors.extend(result.errors);
-            continue;
-        }
-        if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
-            if let Err(e) = write_output(js_out, &code, result.js_map.as_deref()) {
-                all_errors.push(format!("error: cannot write {js_out}: {e}"));
-            }
-        }
-        if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
-            if let Err(e) = write_output(dts_out, &code, None) {
-                all_errors.push(format!("error: cannot write {dts_out}: {e}"));
-            }
-        }
+    // Declaration files have nothing to transpile and, matching tsc, are never emitted.
+    if is_declaration_file(&entry.src) {
+        return vec![format!(
+            "error: declaration file \"{}\" produces no outputs and cannot be a transpile entry",
+            entry.src
+        )];
     }
 
-    if !all_errors.is_empty() {
-        return Err(all_errors);
+    let entry_options = Options {
+        emit_js: entry.js_out.is_some(),
+        emit_dts: entry.dts_out.is_some(),
+        ..options.clone()
+    };
+    let result = transpile(&entry.src, &content, &entry_options);
+    if !result.errors.is_empty() {
+        return result.errors;
     }
 
-    Ok(())
+    let mut errors = Vec::new();
+    if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
+        if let Err(e) = write_output(js_out, &code, result.js_map.as_deref()) {
+            errors.push(format!("error: cannot write {js_out}: {e}"));
+        }
+    }
+    if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
+        if let Err(e) = write_output(dts_out, &code, None) {
+            errors.push(format!("error: cannot write {dts_out}: {e}"));
+        }
+    }
+    errors
 }
 
 fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()> {
@@ -1315,6 +1344,23 @@ mod tests {
     }
 
     #[test]
+    fn run_requires_positive_cpu_count() {
+        for value in ["0", "-1", "many"] {
+            let err = run(args(&["--emit-js", "--cpus", value])).unwrap_err();
+            assert_eq!(
+                err,
+                vec![format!("error: --cpus must be a positive integer, got \"{value}\"")]
+            );
+        }
+    }
+
+    #[test]
+    fn run_requires_cpu_count_value() {
+        let err = run(args(&["--emit-js", "--cpus"])).unwrap_err();
+        assert_eq!(err, vec!["error: --cpus requires a positive integer".to_string()]);
+    }
+
+    #[test]
     fn run_requires_manifest_path() {
         let err = run(args(&["--emit-js", "--manifest"])).unwrap_err();
         assert_eq!(err, vec!["error: --manifest requires a file path".to_string()]);
@@ -1386,6 +1432,48 @@ mod tests {
         ]))
         .unwrap();
         assert!(read(&js_out).contains("export const x = 1"));
+    }
+
+    #[test]
+    fn run_accepts_cpu_count() {
+        let dir = test_dir("run_parallel");
+        let first = dir.join("first.ts");
+        let second = dir.join("second.ts");
+        fs::write(&first, "export const first: number = 1;\n").unwrap();
+        fs::write(&second, "export const second: number = 2;\n").unwrap();
+        let first_out = dir.join("out/first.js");
+        let second_out = dir.join("out/second.js");
+        run(args(&[
+            "--emit-js",
+            "--cpus",
+            "2",
+            first.to_str().unwrap(),
+            first_out.to_str().unwrap(),
+            second.to_str().unwrap(),
+            second_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(read(&first_out).contains("export const first = 1"));
+        assert!(read(&second_out).contains("export const second = 2"));
+    }
+
+    #[test]
+    fn run_reports_parallel_errors_in_manifest_order() {
+        let dir = test_dir("run_parallel_error_order");
+        let mut cli = vec!["--emit-js".to_string(), "--cpus".to_string(), "2".to_string()];
+        for i in 0..6 {
+            let src = dir.join(format!("{i}.ts"));
+            fs::write(&src, "export const x: number = ;\n").unwrap();
+            cli.push(src.to_str().unwrap().to_string());
+            cli.push(dir.join(format!("out/{i}.js")).to_str().unwrap().to_string());
+        }
+        let err = run(cli.into_iter()).unwrap_err();
+        let reported: Vec<_> = err
+            .iter()
+            .filter_map(|e| e.split('/').last()?.split(':').next().map(str::to_string))
+            .collect();
+        let expected: Vec<_> = (0..6).map(|i| format!("{i}.ts")).collect();
+        assert_eq!(reported, expected, "{err:?}");
     }
 
     #[test]

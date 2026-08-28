@@ -158,6 +158,10 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--jsx", ctx.attr.jsx)
         if ctx.attr.jsx_import_source:
             args.add("--jsx-import-source", ctx.attr.jsx_import_source)
+        if ctx.attr.jsx_factory:
+            args.add("--jsx-pragma", ctx.attr.jsx_factory)
+        if ctx.attr.jsx_fragment_factory:
+            args.add("--jsx-pragma-frag", ctx.attr.jsx_fragment_factory)
         if ctx.attr.rewrite_extensions:
             args.add("--rewrite-extensions")
         if ctx.attr.target:
@@ -198,6 +202,9 @@ def _oxc_transpiler_impl(ctx):
 
     if ctx.attr.jsx_import_source and ctx.attr.jsx == "classic":
         fail("jsx_import_source requires the automatic JSX runtime; unset it or set jsx = \"automatic\".")
+
+    if (ctx.attr.jsx_factory or ctx.attr.jsx_fragment_factory) and ctx.attr.jsx != "classic":
+        fail("jsx_factory and jsx_fragment_factory require jsx = \"classic\".")
 
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
@@ -402,6 +409,16 @@ _oxc_transpiler_rule = rule(
                   "jsxImportSource; \"react\" by default. Only applies to " +
                   "jsx = \"automatic\".",
         ),
+        "jsx_factory": attr.string(
+            doc = "Function the classic JSX runtime compiles elements to, " +
+                  "tsc's jsxFactory; React.createElement by default. Only " +
+                  "applies to jsx = \"classic\".",
+        ),
+        "jsx_fragment_factory": attr.string(
+            doc = "Expression the classic JSX runtime compiles fragments to, " +
+                  "tsc's jsxFragmentFactory; React.Fragment by default. Only " +
+                  "applies to jsx = \"classic\".",
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -490,6 +507,8 @@ def oxc_transpiler(
         verbatim_module_syntax = False,
         strip_internal = False,
         jsx_import_source = "",
+        jsx_factory = "",
+        jsx_fragment_factory = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -517,6 +536,9 @@ def oxc_transpiler(
             .d.ts outputs.
         jsx_import_source: module the automatic JSX runtime is imported from, tsc's
             jsxImportSource.
+        jsx_factory: function the classic runtime compiles elements to, tsc's jsxFactory.
+        jsx_fragment_factory: expression the classic runtime compiles fragments to, tsc's
+            jsxFragmentFactory.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -544,5 +566,7 @@ def oxc_transpiler(
         verbatim_module_syntax = verbatim_module_syntax or False,
         strip_internal = strip_internal or False,
         jsx_import_source = jsx_import_source or "",
+        jsx_factory = jsx_factory or "",
+        jsx_fragment_factory = jsx_fragment_factory or "",
         **kwargs
     )

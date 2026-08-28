@@ -222,6 +222,64 @@ diff_test(
     file2 = "snapshots/component_classic.js",
 )
 
+# jsx_factory and jsx_fragment_factory replace React.createElement and
+# React.Fragment in the classic runtime, like tsc's jsxFactory and
+# jsxFragmentFactory.
+oxc_transpiler(
+    name = "transpile_jsx_classic_default_factory",
+    srcs = ["src/fragment.tsx"],
+    jsx = "classic",
+    out_dir = "classicfactorydefault",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "jsx_classic_default_factory_test",
+    file1 = "classicfactorydefault/fragment.js",
+    file2 = "snapshots/fragment_classic.js",
+)
+
+# Each factory can be set alone, keeping React's default for the other, and
+# may be a member expression; plain .jsx sources use the same factories.
+[
+    (
+        oxc_transpiler(
+            name = "transpile_jsx_factory_" + name,
+            srcs = [
+                "src/fragment.tsx",
+                "src/widget.jsx",
+            ],
+            emit_dts = True,
+            jsx = "classic",
+            jsx_factory = factory,
+            jsx_fragment_factory = fragment,
+            out_dir = "classicfactory_" + name,
+            root_dir = "src",
+        ),
+        diff_test(
+            name = "jsx_factory_" + name + "_test",
+            file1 = "classicfactory_" + name + "/fragment.js",
+            file2 = "snapshots/fragment_" + name + ".js",
+        ),
+        diff_test(
+            name = "jsx_factory_" + name + "_widget_test",
+            file1 = "classicfactory_" + name + "/widget.js",
+            file2 = "snapshots/widget_" + name + ".js",
+        ),
+        diff_test(
+            name = "jsx_factory_" + name + "_dts_test",
+            file1 = "classicfactory_" + name + "/fragment.d.ts",
+            file2 = "snapshots/fragment.d.ts",
+        ),
+    )
+    for name, factory, fragment in [
+        ("h", "h", "Fragment"),
+        ("factory_only", "h", ""),
+        ("fragment_only", "", "Fragment"),
+        ("member", "dom.createElement", "dom.Fragment"),
+    ]
+]
+
 # jsx_import_source redirects the automatic runtime import from "react" to the
 # given module, like tsc's jsxImportSource, for every runtime import (jsx, jsxs
 # and Fragment) and for plain .jsx sources too; explicit jsx = "automatic" is

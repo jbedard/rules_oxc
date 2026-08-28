@@ -156,6 +156,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--source-maps")
         if ctx.attr.jsx:
             args.add("--jsx", ctx.attr.jsx)
+        if ctx.attr.jsx_import_source:
+            args.add("--jsx-import-source", ctx.attr.jsx_import_source)
         if ctx.attr.rewrite_extensions:
             args.add("--rewrite-extensions")
         if ctx.attr.target:
@@ -193,6 +195,9 @@ def _oxc_transpiler_impl(ctx):
 
     if ctx.attr.declaration_dir != "" and ctx.attr.root_dir == "":
         fail("When declaration_dir is set, root_dir must also be set.")
+
+    if ctx.attr.jsx_import_source and ctx.attr.jsx == "classic":
+        fail("jsx_import_source requires the automatic JSX runtime; unset it or set jsx = \"automatic\".")
 
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
@@ -392,6 +397,11 @@ _oxc_transpiler_rule = rule(
                   "tsc's jsx value spellings to oxc's manually.",
             values = ["", "automatic", "classic"],
         ),
+        "jsx_import_source": attr.string(
+            doc = "Module the automatic JSX runtime is imported from, tsc's " +
+                  "jsxImportSource; \"react\" by default. Only applies to " +
+                  "jsx = \"automatic\".",
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -479,6 +489,7 @@ def oxc_transpiler(
         use_define_for_class_fields = None,
         verbatim_module_syntax = False,
         strip_internal = False,
+        jsx_import_source = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -504,6 +515,8 @@ def oxc_transpiler(
             after type stripping instead of eliding them.
         strip_internal: tsc's stripInternal; omit `/** @internal */` declarations from the
             .d.ts outputs.
+        jsx_import_source: module the automatic JSX runtime is imported from, tsc's
+            jsxImportSource.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -530,5 +543,6 @@ def oxc_transpiler(
         use_define_for_class_fields = _tristate(use_define_for_class_fields),
         verbatim_module_syntax = verbatim_module_syntax or False,
         strip_internal = strip_internal or False,
+        jsx_import_source = jsx_import_source or "",
         **kwargs
     )

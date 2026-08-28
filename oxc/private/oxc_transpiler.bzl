@@ -170,6 +170,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--only-remove-type-imports")
     if emit_dts:
         args.add("--emit-dts")
+        if ctx.attr.strip_internal:
+            args.add("--strip-internal")
     args.add("--manifest")
     args.add(manifest)
 
@@ -410,6 +412,12 @@ _oxc_transpiler_rule = rule(
                   "Declaration outputs are unaffected.",
             values = ["", "true", "false"],
         ),
+        "strip_internal": attr.bool(
+            default = False,
+            doc = "tsc's stripInternal: omit declarations documented with " +
+                  "`/** @internal */` from the .d.ts outputs. JS outputs are " +
+                  "unaffected.",
+        ),
         "verbatim_module_syntax": attr.bool(
             default = False,
             doc = "tsc's verbatimModuleSyntax: only imports and exports " +
@@ -470,6 +478,7 @@ def oxc_transpiler(
         helpers_module = "",
         use_define_for_class_fields = None,
         verbatim_module_syntax = False,
+        strip_internal = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -493,6 +502,8 @@ def oxc_transpiler(
             A select() must use the strings "true" and "false".
         verbatim_module_syntax: tsc's verbatimModuleSyntax; keep imports that are unused
             after type stripping instead of eliding them.
+        strip_internal: tsc's stripInternal; omit `/** @internal */` declarations from the
+            .d.ts outputs.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -518,5 +529,6 @@ def oxc_transpiler(
         helpers_module = helpers_module or "",
         use_define_for_class_fields = _tristate(use_define_for_class_fields),
         verbatim_module_syntax = verbatim_module_syntax or False,
+        strip_internal = strip_internal or False,
         **kwargs
     )

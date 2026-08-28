@@ -4,6 +4,7 @@ load("@aspect_rules_js//js:providers.bzl", "JsInfo")
 
 # buildifier: disable=bzl-visibility
 load("@aspect_rules_ts//ts/private:ts_lib.bzl", "lib")
+load("@bazel_lib//lib:copy_file.bzl", "COPY_FILE_TOOLCHAINS", "copy_file_action")
 
 # Output extension for each input extension.
 # .ts/.tsx/.jsx default to .js: JSX is always transformed, so the output is
@@ -200,13 +201,14 @@ def _oxc_transpiler_impl(ctx):
                 "The file \"{}\" would produce output outside out_dir: \"{}\".\n".format(src_path, ctx.attr.out_dir),
             )
 
-        # JSON has no syntax to transpile: copy it through unchanged, like tsc's
-        # resolveJsonModule emit and swc's equivalent data-src handling.
+        # JSON has no syntax to transpile: with emit_json it is copied through
+        # unchanged, like tsc's resolveJsonModule emit. Without it a json src produces nothing,
+        # matching tsc/ts_project, where the mistake surfaces in the typecheck instead.
         if src_path.endswith(".json"):
-            if ctx.attr.emit_js:
+            if ctx.attr.emit_js and ctx.attr.emit_json:
                 out_path = lib.to_out_path(src_path, ctx.attr.out_dir, ctx.attr.root_dir)
                 out = _declare(ctx, predeclared, out_path)
-                ctx.actions.symlink(output = out, target_file = src)
+                copy_file_action(ctx, src, out)
                 json_outs.append(out)
             continue
 
@@ -299,6 +301,13 @@ _oxc_transpiler_rule = rule(
         "js_outs": attr.output_list(),
         "dts_outs": attr.output_list(),
         "json_outs": attr.output_list(),
+        "emit_json": attr.bool(
+            default = False,
+            doc = "Copy .json srcs into the output layout, like tsc's emit " +
+                  "under resolveJsonModule; set this when the tsconfig sets " +
+                  "resolveJsonModule. Without it json srcs produce no " +
+                  "outputs, matching tsc.",
+        ),
         "out_dir": attr.string(),
         "declaration_dir": attr.string(
             doc = "Directory for the .d.ts outputs, like tsc's declarationDir. " +
@@ -391,6 +400,7 @@ _oxc_transpiler_rule = rule(
             cfg = "exec",
         ),
     },
+    toolchains = COPY_FILE_TOOLCHAINS,
 )
 
 def oxc_transpiler(
@@ -407,6 +417,7 @@ def oxc_transpiler(
         helpers_module = "",
         jsx = "",
         module = "",
+        emit_json = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time."""
     _oxc_transpiler_rule(
@@ -414,7 +425,7 @@ def oxc_transpiler(
         srcs = srcs,
         js_outs = _calculate_outs(srcs, _to_js_out, out_dir or "", root_dir or "") if emit_js else [],
         dts_outs = _calculate_outs(srcs, _to_dts_out, declaration_dir or out_dir or "", root_dir or "") if emit_dts else [],
-        json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js else [],
+        json_outs = _calculate_outs(srcs, _to_json_out, out_dir or "", root_dir or "") if emit_js and emit_json else [],
         out_dir = out_dir or "",
         declaration_dir = declaration_dir or "",
         root_dir = root_dir or "",
@@ -426,5 +437,6 @@ def oxc_transpiler(
         target = target or "",
         helpers_module = helpers_module or "",
         module = module or "",
+        emit_json = emit_json or False,
         **kwargs
     )

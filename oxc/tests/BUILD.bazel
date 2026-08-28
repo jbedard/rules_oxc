@@ -61,6 +61,7 @@ oxc_transpiler(
         "src/sub/*.ts",
     ]),
     emit_dts = True,
+    emit_json = True,
     out_dir = "dist",
     root_dir = "src",
 )
@@ -86,11 +87,34 @@ build_test(
     ],
 )
 
-# JSON sources are copied through unchanged.
+# JSON sources are copied through unchanged under emit_json.
 diff_test(
     name = "json_test",
     file1 = "dist/data.json",
     file2 = "src/data.json",
+)
+
+# Without emit_json a json src produces no outputs, matching tsc: the target still
+# analyzes and builds, and no dist path is pre-declared for the json file.
+oxc_transpiler(
+    name = "transpile_json_skipped",
+    srcs = [
+        "src/data.json",
+        "src/main.ts",
+    ],
+    out_dir = "nojson",
+    root_dir = "src",
+)
+
+build_test(
+    name = "json_skipped_test",
+    targets = [":transpile_json_skipped"],
+)
+
+diff_test(
+    name = "json_skipped_js_test",
+    file1 = "nojson/main.js",
+    file2 = "snapshots/main.js",
 )
 
 diff_test(

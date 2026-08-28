@@ -20,8 +20,6 @@ use oxc::transformer::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-mod resolver;
-use resolver::resolve_specifier;
 
 #[derive(Clone)]
 struct Options {
@@ -43,9 +41,6 @@ struct Options {
     // error. CommonJS rewrites that syntax and adds "use strict"; oxc has no ESM-to-CJS
     // transform, so remaining ESM syntax is an error.
     module: Module,
-    // Directories forming one virtual directory for resolving relative specifiers, like tsc's
-    // rootDirs. Empty means only the source's own directory is searched.
-    root_dirs: Vec<PathBuf>,
     // Module the automatic JSX runtime is imported from (oxc's import_source), tsc's
     // jsxImportSource. Defaults to "react".
     jsx_import_source: Option<String>,
@@ -75,7 +70,6 @@ impl Default for Options {
             env: None,
             helpers_module: None,
             module: Module::Preserve,
-            root_dirs: Vec::new(),
             jsx_import_source: None,
             jsx_pragma: None,
             jsx_pragma_frag: None,
@@ -202,9 +196,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                     }
                 };
             }
-            "--root-dirs" => {
-                cli.options.root_dirs.push(PathBuf::from(flag_value(&mut args, &arg, "a path")?));
-            }
             "--manifest" => {
                 cli.manifest_path = Some(flag_value(&mut args, &arg, "a file path")?);
             }
@@ -295,11 +286,12 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<Vec<Output>
             }
         };
 
-        // Declaration files pass through unchanged and have no JS output.
+        // Declaration files have nothing to transpile and, matching tsc, are never emitted.
         if is_declaration_file(&entry.src) {
-            if let Some(dts_out) = &entry.dts_out {
-                outputs.push(Output { path: dts_out.clone(), code: content, map: None });
-            }
+            all_errors.push(format!(
+                "error: declaration file \"{}\" produces no outputs and cannot be a transpile entry",
+                entry.src
+            ));
             continue;
         }
 
@@ -575,12 +567,6 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
             }
         }
 
-        resolve_relative_specifiers(
-            &mut parser_ret.program,
-            &allocator,
-            Path::new(filename),
-            &options.root_dirs,
-        );
 
         let mut codegen = Codegen::new();
         if options.source_maps {
@@ -598,45 +584,11 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
     result
 }
 
-// Node's ESM loader requires fully-specified relative specifiers: no directory imports and no
-// extensionless imports. TS's "bundler" moduleResolution allows both (omitting the extension, or
-// importing a directory resolved via its index file), so those are resolved here against the
-// source files on disk.
-//
-// Extensioned specifiers are left alone: rewriting TypeScript extensions is the transformer's
-// `rewrite_import_extensions` option. Static imports are top-level only, so no full AST walk is needed.
-fn resolve_relative_specifiers<'a>(
-    program: &mut Program<'a>,
-    allocator: &'a Allocator,
-    filename: &Path,
-    root_dirs: &[PathBuf],
-) {
-    let base_dir = filename.parent().unwrap_or_else(|| Path::new(""));
-
-
-    for stmt in program.body.iter_mut() {
-        let source = match stmt {
-            Statement::ImportDeclaration(decl) => Some(&mut decl.source),
-            Statement::ExportFromDeclaration(decl) => Some(&mut decl.source),
-            Statement::ExportAllDeclaration(decl) => Some(&mut decl.source),
-            _ => None,
-        };
-
-        if let Some(source) = source
-            && let Some(resolved) =
-                resolve_specifier(base_dir, source.value.as_str(), root_dirs)
-        {
-            source.value = allocator.alloc_str(&resolved).into();
-            source.raw = None;
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Shared with the resolver module's tests.
     pub(crate) fn test_dir(name: &str) -> PathBuf {
         let base = std::env::var_os("TEST_TMPDIR")
             .map(PathBuf::from)
@@ -1262,34 +1214,23 @@ mod tests {
         assert!(err[0].contains("unsupported --jsx \"preserve\""), "{err:?}");
     }
 
+    // Specifiers are emitted verbatim, like tsc: no filesystem-based resolution of extensionless
+    // or directory imports.
     #[test]
-    fn transpile_resolves_across_root_dirs() {
-        let dir = test_dir("transpile_root_dirs");
-        fs::create_dir_all(dir.join("app")).unwrap();
-        fs::create_dir_all(dir.join("lib")).unwrap();
-        fs::write(dir.join("lib/shared.ts"), "").unwrap();
-        let options = Options {
-            root_dirs: vec![dir.join("app"), dir.join("lib")],
-            ..js_options()
-        };
-        let src = dir.join("app/main.ts");
-        let js = transpile_js(src.to_str().unwrap(), "export * from \"./shared\";\n", &options);
-        assert!(js.contains("export * from \"./shared.js\""), "js: {js}");
-    }
-
-    #[test]
-    fn run_requires_root_dirs_value() {
-        let err = run(args(&["--emit-js", "--root-dirs"])).unwrap_err();
-        assert_eq!(err, vec!["error: --root-dirs requires a path".to_string()]);
-    }
-
-    #[test]
-    fn transpile_resolves_export_all_specifier() {
-        let dir = test_dir("transpile_export_all");
+    fn transpile_emits_specifiers_verbatim() {
+        let dir = test_dir("transpile_verbatim");
         fs::write(dir.join("b.ts"), "").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/index.ts"), "").unwrap();
         let src = dir.join("a.ts");
-        let js = transpile_js(src.to_str().unwrap(), "export * from \"./b\";\n", &js_options());
-        assert!(js.contains("export * from \"./b.js\""), "js: {js}");
+        let js = transpile_js(
+            src.to_str().unwrap(),
+            "export * from \"./b\";\nexport * from \"./sub\";\n",
+            &js_options(),
+        );
+        assert!(js.contains("export * from \"./b\""), "js: {js}");
+        assert!(js.contains("export * from \"./sub\""), "js: {js}");
+        assert!(!js.contains("./b.js"), "js: {js}");
     }
 
     #[test]
@@ -1487,53 +1428,30 @@ mod tests {
         assert!(!dir.join("out/a.d.ts").exists());
     }
 
+    // Declaration files are never transpile entries: matching tsc, they are inputs to the type
+    // checker, not emitted outputs.
     #[test]
-    fn run_passes_through_declaration_files() {
-        let dir = test_dir("run_dts_passthrough");
-        let src = dir.join("a.d.ts");
-        let content = "export declare const x: number;\n";
-        fs::write(&src, content).unwrap();
-        let dts_out = dir.join("out/a.d.ts");
-        let manifest = dir.join("manifest.txt");
-        // Declaration entry: empty JS output line, copied to the dts output.
-        fs::write(
-            &manifest,
-            format!("{}\n\n{}\n", src.display(), dts_out.display()),
-        )
-        .unwrap();
-        run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            "--manifest",
-            manifest.to_str().unwrap(),
-        ]))
-        .unwrap();
-        assert_eq!(read(&dts_out), content);
-    }
-
-    // .d.mts/.d.cts pass through like .d.ts instead of hitting the transpile path.
-    #[test]
-    fn run_passes_through_module_variant_declaration_files() {
-        let dir = test_dir("run_dmts_passthrough");
-        for (name, out_name) in [("a.d.mts", "out/a.d.mts"), ("b.d.cts", "out/b.d.cts")] {
+    fn run_rejects_declaration_file_entries() {
+        let dir = test_dir("run_dts_rejected");
+        for name in ["a.d.ts", "a.d.mts", "a.d.cts"] {
             let src = dir.join(name);
-            let content = "export declare const x: number;\n";
-            fs::write(&src, content).unwrap();
-            let dts_out = dir.join(out_name);
+            fs::write(&src, "export declare const x: number;\n").unwrap();
+            let dts_out = dir.join("out").join(name);
             let manifest = dir.join("manifest.txt");
             fs::write(
                 &manifest,
                 format!("{}\n\n{}\n", src.display(), dts_out.display()),
             )
             .unwrap();
-            run(args(&[
+            let err = run(args(&[
                 "--emit-js",
                 "--emit-dts",
                 "--manifest",
                 manifest.to_str().unwrap(),
             ]))
-            .unwrap();
-            assert_eq!(read(&dts_out), content);
+            .unwrap_err();
+            assert!(err[0].contains("produces no outputs"), "{err:?}");
+            assert!(!dts_out.exists());
         }
     }
 

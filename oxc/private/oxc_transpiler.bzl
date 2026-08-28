@@ -121,6 +121,15 @@ def _declare(ctx, predeclared, out_path):
         out = ctx.actions.declare_file(out_path)
     return out
 
+# Targets below es2022, where tsc defaults useDefineForClassFields to false.
+_TARGETS_WITHOUT_DEFINE = ("es6", "es2015", "es2016", "es2017", "es2018", "es2019", "es2020", "es2021")
+
+def _use_define_for_class_fields(ctx):
+    """Resolve the tri-state attribute, deriving the default from the configured target."""
+    if ctx.attr.use_define_for_class_fields:
+        return ctx.attr.use_define_for_class_fields == "true"
+    return ctx.attr.target not in _TARGETS_WITHOUT_DEFINE
+
 def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
     """Run one transpiler action emitting JS and/or declaration outputs.
 
@@ -155,6 +164,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--module", ctx.attr.module)
         if ctx.attr.helpers_module:
             args.add("--helpers-module", ctx.attr.helpers_module)
+        if _use_define_for_class_fields(ctx):
+            args.add("--use-define-for-class-fields")
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
@@ -387,6 +398,16 @@ _oxc_transpiler_rule = rule(
                   "limitations). Specifiers with other extensions (e.g. '.js') " +
                   "are left untouched.",
         ),
+        "use_define_for_class_fields": attr.string(
+            doc = "tsc's useDefineForClassFields. \"true\" keeps class fields " +
+                  "as field definitions, so a field without an initializer is " +
+                  "defined as undefined. \"false\" removes fields without an " +
+                  "initializer and assigns the others in the constructor. " +
+                  "Unset defaults like tsc: \"true\" for target es2022 and " +
+                  "above (including the default, esnext), \"false\" below. " +
+                  "Declaration outputs are unaffected.",
+            values = ["", "true", "false"],
+        ),
         "helpers_module": attr.string(
             doc = "Module to import runtime helpers from, defaulting to " +
                   "@oxc-project/runtime. Transforms that need a helper always " +
@@ -414,6 +435,14 @@ def _clean_dir(path):
         return "."
     return path.removeprefix("./")
 
+def _tristate(value):
+    """Map None/True/False to the rule's string attribute; a select() of those strings passes through."""
+    if value == None:
+        return ""
+    if type(value) == "bool":
+        return "true" if value else "false"
+    return value
+
 def oxc_transpiler(
         name,
         srcs,
@@ -429,6 +458,7 @@ def oxc_transpiler(
         jsx = "",
         rewrite_extensions = False,
         helpers_module = "",
+        use_define_for_class_fields = None,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -447,6 +477,9 @@ def oxc_transpiler(
         jsx: JSX runtime, "automatic" or "classic".
         rewrite_extensions: rewrite .ts-style import extensions to their JS extension.
         helpers_module: module to import runtime helpers from.
+        use_define_for_class_fields: tsc's useDefineForClassFields. Defaults like tsc to
+            True for target es2022 and above (including the default, esnext) and False below.
+            A select() must use the strings "true" and "false".
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -470,5 +503,6 @@ def oxc_transpiler(
         jsx = jsx or "",
         rewrite_extensions = rewrite_extensions or False,
         helpers_module = helpers_module or "",
+        use_define_for_class_fields = _tristate(use_define_for_class_fields),
         **kwargs
     )

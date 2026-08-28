@@ -644,6 +644,93 @@ diff_test(
     file2 = "snapshots/async_custom_helpers.js",
 )
 
+# use_define_for_class_fields defaults like tsc: define semantics for the default
+# (esnext) target keep the declared field, while a target below es2022 removes
+# it and assigns the initialized field in the constructor. Setting the attribute
+# overrides the target-derived default either way; define semantics below es2022
+# downlevel the fields through the defineProperty helper imported from
+# @oxc-project/runtime, like tsc's Object.defineProperty emit, so the runtime
+# package becomes a runtime dependency. helpers_module redirects that import.
+# Assign semantics on es2022 and above initialize statics in a static block,
+# below es2022 by assignment after the class.
+[
+    (
+        oxc_transpiler(
+            name = "transpile_class_fields_" + name,
+            srcs = ["src/fields.ts"],
+            emit_dts = True,
+            helpers_module = helpers_module,
+            out_dir = "classfields_" + name,
+            root_dir = "src",
+            target = target,
+            use_define_for_class_fields = use_define,
+        ),
+        diff_test(
+            name = "class_fields_" + name + "_test",
+            file1 = "classfields_" + name + "/fields.js",
+            file2 = "snapshots/fields_" + snapshot + ".js",
+        ),
+        diff_test(
+            name = "class_fields_" + name + "_dts_test",
+            file1 = "classfields_" + name + "/fields.d.ts",
+            file2 = "snapshots/fields.d.ts",
+        ),
+    )
+    for name, target, use_define, helpers_module, snapshot in [
+        ("default", "", None, "", "define"),
+        ("es2022", "es2022", None, "", "define"),
+        ("es2021", "es2021", None, "", "assign"),
+        ("es2015", "es2015", None, "", "assign"),
+        ("es6", "es6", None, "", "assign"),
+        ("es2021_define", "es2021", True, "", "define_es2021"),
+        ("es2021_define_helpers", "es2021", True, "custom-helpers", "define_es2021_custom_helpers"),
+        ("esnext_assign", "esnext", False, "", "assign_esnext"),
+    ]
+]
+
+# The default is derived from the configured target, so a target chosen with
+# select() still gets tsc's default for the value it resolves to.
+config_setting(
+    name = "never",
+    values = {"define": "oxc_tests_never=1"},
+)
+
+oxc_transpiler(
+    name = "transpile_class_fields_select",
+    srcs = ["src/fields.ts"],
+    out_dir = "classfields_select",
+    root_dir = "src",
+    target = select({
+        ":never": "esnext",
+        "//conditions:default": "es2021",
+    }),
+)
+
+diff_test(
+    name = "class_fields_select_test",
+    file1 = "classfields_select/fields.js",
+    file2 = "snapshots/fields_assign.js",
+)
+
+# The attribute itself accepts a select() over the rule's "true"/"false"
+# strings, passed through unchanged.
+oxc_transpiler(
+    name = "transpile_class_fields_select_attr",
+    srcs = ["src/fields.ts"],
+    out_dir = "classfields_select_attr",
+    root_dir = "src",
+    use_define_for_class_fields = select({
+        ":never": "true",
+        "//conditions:default": "false",
+    }),
+)
+
+diff_test(
+    name = "class_fields_select_attr_test",
+    file1 = "classfields_select_attr/fields.js",
+    file2 = "snapshots/fields_assign_esnext.js",
+)
+
 # module = "commonjs": TypeScript's CommonJS-specific syntax is rewritten (`export =` to
 # module.exports, `import x = require(...)` to a require call) and "use strict" is added. ESM
 # syntax in srcs would be an error: oxc has no ESM-to-CommonJS transform.

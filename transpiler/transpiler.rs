@@ -28,8 +28,18 @@ struct Options {
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
+    // tsc's inlineSourceMap: the JS source map embedded as a data URL in the sourceMappingURL
+    // comment instead of written to a .js.map file. Exclusive with source_maps.
+    inline_source_maps: bool,
     // tsc's declarationMap: a .d.ts.map beside each declaration output. Requires emit_dts.
     declaration_maps: bool,
+    // tsc's sourceRoot: the `sourceRoot` recorded in every source map.
+    source_root: Option<String>,
+    // Directory the map `sources` are recorded relative to when source_root is set, since
+    // consumers then resolve them against source_root instead of the map's location. tsc uses
+    // its rootDir here; the Bazel rule passes the root_dir. Without it sources stay relative to
+    // the map, which is only correct when the map sits in that root.
+    source_root_dir: Option<PathBuf>,
     // The "automatic" or "classic" runtime of the JSX transform (tsc's jsx=react-jsx and
     // jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under Node, and a
     // JSX-aware bundler consumes the .tsx sources directly.
@@ -129,7 +139,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--emit-js" => cli.options.emit_js = true,
             "--emit-dts" => cli.options.emit_dts = true,
             "--source-maps" => cli.options.source_maps = true,
+            "--inline-source-maps" => cli.options.inline_source_maps = true,
             "--declaration-maps" => cli.options.declaration_maps = true,
+            "--source-root" => {
+                cli.options.source_root = Some(flag_value(&mut args, &arg, "a value")?);
+            }
+            "--source-root-dir" => {
+                cli.options.source_root_dir =
+                    Some(PathBuf::from(flag_value(&mut args, &arg, "a directory path")?));
+            }
             "--cpus" => {
                 let value = flag_value(&mut args, &arg, "a positive integer")?;
                 cli.cpus = value
@@ -236,6 +254,27 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
         return Err(vec!["error: --declaration-maps requires --emit-dts".to_string()]);
     }
 
+    if cli.options.source_maps && cli.options.inline_source_maps {
+        return Err(vec![
+            "error: --source-maps and --inline-source-maps are mutually exclusive".to_string(),
+        ]);
+    }
+
+    if cli.options.source_root.is_some()
+        && !(cli.options.source_maps
+            || cli.options.inline_source_maps
+            || cli.options.declaration_maps)
+    {
+        return Err(vec![
+            "error: --source-root requires --source-maps, --inline-source-maps, or --declaration-maps"
+                .to_string(),
+        ]);
+    }
+
+    if cli.options.source_root_dir.is_some() && cli.options.source_root.is_none() {
+        return Err(vec!["error: --source-root-dir requires --source-root".to_string()]);
+    }
+
     Ok(cli)
 }
 
@@ -330,8 +369,12 @@ fn transpile_entry(
         Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
     };
 
-    // Source map consumers resolve `sources` against the map's own location.
+    // Source map consumers resolve `sources` against the map's own location — or, when
+    // sourceRoot is set, against that root, so sources are recorded relative to its directory.
     let map_source = |out: &Option<String>| {
+        if let Some(root_dir) = &options.source_root_dir {
+            return relative_to(Path::new(&entry.src), root_dir);
+        }
         out.as_deref()
             .and_then(|out| Path::new(out).parent())
             .map(|out_dir| relative_to(Path::new(&entry.src), out_dir))
@@ -354,19 +397,32 @@ fn transpile_entry(
 
     let mut errors = Vec::new();
     if let (Some(js_out), Some(code)) = (&entry.js_out, outputs.js_code) {
-        if let Err(e) = write_output(js_out, &code, outputs.js_map.as_deref()) {
+        let map = if options.inline_source_maps {
+            outputs.js_map_data_url.map(SourceMapOutput::Inline)
+        } else {
+            outputs.js_map.map(SourceMapOutput::File)
+        };
+        if let Err(e) = write_output(js_out, &code, map.as_ref()) {
             errors.push(format!("error: cannot write {js_out}: {e}"));
         }
     }
     if let (Some(dts_out), Some(code)) = (&entry.dts_out, outputs.dts_code) {
-        if let Err(e) = write_output(dts_out, &code, outputs.dts_map.as_deref()) {
+        let map = outputs.dts_map.map(SourceMapOutput::File);
+        if let Err(e) = write_output(dts_out, &code, map.as_ref()) {
             errors.push(format!("error: cannot write {dts_out}: {e}"));
         }
     }
     errors
 }
 
-fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()> {
+enum SourceMapOutput {
+    // JSON written to a sibling .map file, referenced by name.
+    File(String),
+    // A data URL embedded in the sourceMappingURL comment itself.
+    Inline(String),
+}
+
+fn write_output(path: &str, code: &str, map: Option<&SourceMapOutput>) -> std::io::Result<()> {
     let out = Path::new(path);
     let mut file = fs::File::create(out)?;
     file.write_all(code.as_bytes())?;
@@ -374,8 +430,13 @@ fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()
         if !code.ends_with('\n') {
             file.write_all(b"\n")?;
         }
-        write!(file, "//# sourceMappingURL={}.map", out.file_name().unwrap().to_string_lossy())?;
-        fs::write(format!("{path}.map"), map)?;
+        match map {
+            SourceMapOutput::File(json) => {
+                write!(file, "//# sourceMappingURL={}.map", out.file_name().unwrap().to_string_lossy())?;
+                fs::write(format!("{path}.map"), json)?;
+            }
+            SourceMapOutput::Inline(url) => write!(file, "//# sourceMappingURL={url}")?,
+        }
     }
     Ok(())
 }
@@ -409,8 +470,25 @@ fn is_declaration_file(path: &str) -> bool {
 struct Outputs {
     js_code: Option<String>,
     js_map: Option<String>,
+    js_map_data_url: Option<String>,
     dts_code: Option<String>,
     dts_map: Option<String>,
+}
+
+// Records --source-root in a codegen map. A macro rather than a function: the map type is not
+// re-exported by the oxc facade, so it is rebuilt from its parts through inference, not named.
+macro_rules! with_source_root {
+    ($map:expr, $options:expr) => {{
+        let mut map = $map;
+        if let Some(root) = &$options.source_root {
+            if let Some(m) = map.take() {
+                let mut parts = m.into_parts();
+                parts.source_root = Some(std::borrow::Cow::Owned(root.clone()));
+                map = Some(parts.into());
+            }
+        }
+        map
+    }};
 }
 
 fn build_transform_options(options: &Options) -> TransformOptions {
@@ -616,7 +694,7 @@ fn transpile_to(
         }
         let codegen_ret = codegen.build(&decl_ret.program);
         outputs.dts_code = Some(codegen_ret.code);
-        outputs.dts_map = codegen_ret.map.map(|m| m.to_json_string());
+        outputs.dts_map = with_source_root!(codegen_ret.map, options).map(|m| m.to_json_string());
     }
 
     if emit_js {
@@ -653,7 +731,7 @@ fn transpile_to(
         }
 
         let mut codegen = Codegen::new();
-        if options.source_maps {
+        if options.source_maps || options.inline_source_maps {
             codegen = codegen.with_options(CodegenOptions {
                 source_map_path: Some(js_map_source.to_path_buf()),
                 ..Default::default()
@@ -662,7 +740,13 @@ fn transpile_to(
         let codegen_ret = codegen.build(&parser_ret.program);
 
         outputs.js_code = Some(codegen_ret.code);
-        outputs.js_map = codegen_ret.map.map(|m| m.to_json_string());
+        // Only the emitted form is serialized: the data URL for inline maps, JSON otherwise.
+        let map = with_source_root!(codegen_ret.map, options);
+        if options.inline_source_maps {
+            outputs.js_map_data_url = map.as_ref().map(|m| m.to_data_url());
+        } else {
+            outputs.js_map = map.map(|m| m.to_json_string());
+        }
     }
 
     Ok(outputs)
@@ -1221,6 +1305,91 @@ mod tests {
     }
 
     #[test]
+    fn inline_source_maps_produce_data_url() {
+        let options = Options { inline_source_maps: true, ..js_options() };
+        let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
+        let url = outputs.js_map_data_url.unwrap();
+        assert!(url.starts_with("data:application/json;charset=utf-8;base64,"), "url: {url}");
+        // The JSON form is not serialized for inline maps.
+        assert!(outputs.js_map.is_none());
+    }
+
+    #[test]
+    fn source_root_recorded_in_js_and_declaration_maps() {
+        let options = Options {
+            source_maps: true,
+            declaration_maps: true,
+            source_root: Some("/src".to_string()),
+            ..default_options()
+        };
+        let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
+        for map in [outputs.js_map.unwrap(), outputs.dts_map.unwrap()] {
+            assert!(map.contains("\"sourceRoot\":\"/src\""), "map: {map}");
+        }
+    }
+
+    #[test]
+    fn source_root_absent_by_default() {
+        let options = Options { source_maps: true, ..js_options() };
+        let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
+        let map = outputs.js_map.unwrap();
+        assert!(!map.contains("sourceRoot"), "map: {map}");
+    }
+
+    // Sources are recorded relative to --source-root-dir, since consumers resolve them against
+    // the configured root rather than the map's location.
+    #[test]
+    fn run_source_root_dir_makes_sources_root_relative() {
+        let dir = test_dir("run_source_root_dir");
+        fs::create_dir_all(dir.join("pkg/src/sub")).unwrap();
+        fs::create_dir_all(dir.join("out/sub")).unwrap();
+        let src = dir.join("pkg/src/sub/a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let js_out = dir.join("out/sub/a.js");
+        run(args(&[
+            "--emit-js",
+            "--source-maps",
+            "--source-root",
+            "https://cdn.example/sources/",
+            "--source-root-dir",
+            dir.join("pkg/src").to_str().unwrap(),
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let map = read(&dir.join("out/sub/a.js.map"));
+        assert!(map.contains("\"sourceRoot\":\"https://cdn.example/sources/\""), "map: {map}");
+        assert!(map.contains("\"sources\":[\"sub/a.ts\"]"), "map: {map}");
+    }
+
+    #[test]
+    fn run_rejects_source_root_dir_without_source_root() {
+        let err = run(args(&["--emit-js", "--source-maps", "--source-root-dir", "src"])).unwrap_err();
+        assert_eq!(err, vec!["error: --source-root-dir requires --source-root".to_string()]);
+    }
+
+    #[test]
+    fn run_rejects_source_maps_with_inline_source_maps() {
+        let err = run(args(&["--emit-js", "--source-maps", "--inline-source-maps"])).unwrap_err();
+        assert_eq!(
+            err,
+            vec!["error: --source-maps and --inline-source-maps are mutually exclusive".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_rejects_source_root_without_maps() {
+        let err = run(args(&["--emit-js", "--source-root", "/src"])).unwrap_err();
+        assert!(err[0].starts_with("error: --source-root requires"), "{err:?}");
+    }
+
+    #[test]
+    fn run_requires_source_root_value() {
+        let err = run(args(&["--emit-js", "--source-root"])).unwrap_err();
+        assert_eq!(err, vec!["error: --source-root requires a value".to_string()]);
+    }
+
+    #[test]
     fn declaration_maps_emitted_when_enabled() {
         let options = Options { declaration_maps: true, ..default_options() };
         let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
@@ -1750,6 +1919,28 @@ export class C {
         // The source is recorded relative to the map's directory.
         let map = read(&dir.join("out/a.js.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
+    }
+
+    // Inline maps embed the map in the JS itself: no .js.map file is written.
+    #[test]
+    fn run_embeds_inline_source_map() {
+        let dir = test_dir("run_inline_source_maps");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let js_out = dir.join("out/a.js");
+        run(args(&[
+            "--emit-js",
+            "--inline-source-maps",
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let js = read(&js_out);
+        assert!(
+            js.contains("\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,"),
+            "js: {js}"
+        );
+        assert!(!dir.join("out/a.js.map").exists());
     }
 
     #[test]

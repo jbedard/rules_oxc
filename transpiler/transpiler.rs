@@ -257,16 +257,20 @@ fn read_entries(
 // manifest order. Outputs from entries that completed before a failure are intentionally
 // retained rather than buffering every generated file in memory.
 fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Result<(), Vec<String>> {
+    let transform_options = build_transform_options(options);
     let next = AtomicUsize::new(0);
     let mut errors: Vec<(usize, Vec<String>)> = thread::scope(|scope| {
         let workers: Vec<_> = (0..cpus.min(entries.len()))
             .map(|_| {
                 scope.spawn(|| {
+                    // One arena per worker, reset between files instead of reallocated.
+                    let mut allocator = Allocator::default();
                     let mut errors = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(entry) = entries.get(i) else { break errors };
-                        let entry_errors = transpile_entry(options, entry);
+                        let entry_errors =
+                            transpile_entry(options, &transform_options, &mut allocator, entry);
                         if !entry_errors.is_empty() {
                             errors.push((i, entry_errors));
                         }
@@ -282,7 +286,12 @@ fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Resul
     if all_errors.is_empty() { Ok(()) } else { Err(all_errors) }
 }
 
-fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
+fn transpile_entry(
+    options: &Options,
+    transform_options: &TransformOptions,
+    allocator: &mut Allocator,
+    entry: &Entry,
+) -> Vec<String> {
     // Declaration files have nothing to transpile and, matching tsc, are never emitted.
     if is_declaration_file(&entry.src) {
         return vec![format!(
@@ -303,6 +312,8 @@ fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
         .and_then(|out| Path::new(out).parent())
         .map(|out_dir| relative_to(Path::new(&entry.src), out_dir));
     let outputs = match transpile_to(
+        allocator,
+        transform_options,
         &entry.src,
         &content,
         options,
@@ -524,6 +535,8 @@ fn render_errors(
 // first, before the transformer mutates the program. `map_source` is the path recorded in the
 // source map's `sources`.
 fn transpile_to(
+    allocator: &mut Allocator,
+    transform_options: &TransformOptions,
     filename: &str,
     source_text: &str,
     options: &Options,
@@ -536,8 +549,9 @@ fn transpile_to(
         .unwrap_or_default()
         .with_typescript(true);
 
-    let allocator = Allocator::default();
-    let mut parser_ret = Parser::new(&allocator, source_text, source_type).parse();
+    allocator.reset();
+    let allocator = &*allocator;
+    let mut parser_ret = Parser::new(allocator, source_text, source_type).parse();
 
     let mut outputs = Outputs::default();
 
@@ -547,7 +561,7 @@ fn transpile_to(
 
     if emit_dts {
         let decl_ret = IsolatedDeclarations::new(
-            &allocator,
+            allocator,
             OxcIsolatedDeclarationsOptions {
                 strip_internal: options.strip_internal,
             },
@@ -572,9 +586,7 @@ fn transpile_to(
         let semantic_diagnostics = semantic_ret.diagnostics;
         let scoping = semantic_ret.semantic.into_scoping();
 
-        let transform_options = build_transform_options(options);
-
-        let transformer_ret = Transformer::new(&allocator, Path::new(filename), &transform_options)
+        let transformer_ret = Transformer::new(allocator, Path::new(filename), transform_options)
             .build_with_scoping(scoping, &mut parser_ret.program);
 
         let diagnostics: Vec<_> = semantic_diagnostics
@@ -644,7 +656,16 @@ mod tests {
         options: &Options,
     ) -> Result<Outputs, Vec<String>> {
         let Options { emit_js, emit_dts, .. } = *options;
-        transpile_to(filename, source_text, options, emit_js, emit_dts, Path::new(filename))
+        transpile_to(
+            &mut Allocator::default(),
+            &build_transform_options(options),
+            filename,
+            source_text,
+            options,
+            emit_js,
+            emit_dts,
+            Path::new(filename),
+        )
     }
 
     fn default_options() -> Options {

@@ -1111,6 +1111,71 @@ diff_test(
     ]
 ]
 
+# inline_source_maps: the map is embedded in the JS as a data URL and no .map
+# is written, so the target's outputs are exactly the JS files.
+oxc_transpiler(
+    name = "transpile_inline_source_maps",
+    srcs = ["src/main.ts"],
+    inline_source_maps = True,
+    out_dir = "inlinemaps",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "inline_source_maps_test",
+    file1 = "inlinemaps/main.js",
+    file2 = "snapshots/main_inline_map.js",
+)
+
+select_file(
+    name = "inline_source_maps_outputs",
+    srcs = ":transpile_inline_source_maps",
+    subpath = "inlinemaps/main.js",
+)
+
+diff_test(
+    name = "inline_source_maps_outputs_test",
+    file1 = ":inline_source_maps_outputs",
+    file2 = "snapshots/main_inline_map.js",
+)
+
+# source_root is recorded in the JS and declaration maps alike.
+oxc_transpiler(
+    name = "transpile_source_root",
+    srcs = ["src/main.ts"],
+    declaration_maps = True,
+    emit_dts = True,
+    out_dir = "sourceroot",
+    root_dir = "src",
+    source_maps = True,
+    source_root = "/workspace/src",
+)
+
+filegroup(
+    name = "source_root_types",
+    srcs = [":transpile_source_root"],
+    output_group = "types",
+)
+
+[
+    (
+        select_file(
+            name = "source_root_" + name.replace(".", "_"),
+            srcs = srcs,
+            subpath = "sourceroot/" + name,
+        ),
+        diff_test(
+            name = "source_root_" + name.replace(".", "_") + "_test",
+            file1 = ":source_root_" + name.replace(".", "_"),
+            file2 = "snapshots/sourceroot/" + name,
+        ),
+    )
+    for name, srcs in [
+        ("main.js.map", ":transpile_source_root"),
+        ("main.d.ts.map", ":source_root_types"),
+    ]
+]
+
 # declaration_maps: each declaration gains a sourceMappingURL comment and a
 # sibling .d.ts.map (or .d.mts.map) exposed as types, independent of
 # source_maps; JS outputs are untouched. The maps are not pre-declared, so

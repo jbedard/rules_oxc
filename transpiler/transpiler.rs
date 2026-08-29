@@ -208,6 +208,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--manifest" => {
                 cli.manifest_path = Some(flag_value(&mut args, &arg, "a file path")?);
             }
+            _ if arg.starts_with("--") => {
+                return Err(vec![format!("error: unknown flag \"{arg}\"")]);
+            }
             _ => cli.positional.push(arg),
         }
     }
@@ -311,11 +314,6 @@ fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<(), Vec<Str
 }
 
 fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
-    let content = match fs::read_to_string(&entry.src) {
-        Ok(content) => content,
-        Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
-    };
-
     // Declaration files have nothing to transpile and, matching tsc, are never emitted.
     if is_declaration_file(&entry.src) {
         return vec![format!(
@@ -323,6 +321,11 @@ fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
             entry.src
         )];
     }
+
+    let content = match fs::read_to_string(&entry.src) {
+        Ok(content) => content,
+        Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
+    };
 
     let entry_options = Options {
         emit_js: entry.js_out.is_some(),
@@ -553,10 +556,6 @@ fn render_errors(
         .collect()
 }
 
-fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
-    transpile_to(filename, source_text, options, Path::new(filename))
-}
-
 // Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
 // first, before the transformer mutates the program. `map_source` is the path recorded in the
 // source map's `sources`.
@@ -671,6 +670,10 @@ mod tests {
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
+    }
+
+    fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
+        transpile_to(filename, source_text, options, Path::new(filename))
     }
 
     fn default_options() -> Options {
@@ -1426,6 +1429,12 @@ mod tests {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(result.js_code.unwrap().contains("y = 2"));
         assert!(result.dts_code.is_some());
+    }
+
+    #[test]
+    fn run_rejects_unknown_flag() {
+        let err = run(args(&["--emit-js", "--sourcemap", "a.ts", "a.js"])).unwrap_err();
+        assert_eq!(err, vec!["error: unknown flag \"--sourcemap\"".to_string()]);
     }
 
     #[test]

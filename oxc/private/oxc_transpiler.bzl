@@ -130,7 +130,7 @@ def _use_define_for_class_fields(ctx):
         return ctx.attr.use_define_for_class_fields == "true"
     return ctx.attr.target not in _TARGETS_WITHOUT_DEFINE
 
-def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
+def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
     """Run one transpiler action emitting JS and/or declaration outputs.
 
     Each manifest entry is the source path followed by its JS output path
@@ -184,6 +184,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
         args.add("--emit-dts")
         if ctx.attr.strip_internal:
             args.add("--strip-internal")
+        if ctx.attr.declaration_maps:
+            args.add("--declaration-maps")
     args.add("--manifest")
     args.add(manifest)
 
@@ -192,7 +194,7 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
         arguments = [args],
         mnemonic = "OxcTranspile",
         executable = ctx.executable._tool,
-        outputs = js_outs + [out for out in dts_outs if out] + map_outs,
+        outputs = js_outs + [out for out in dts_outs if out] + map_outs + dts_map_outs,
         execution_requirements = {"supports-path-mapping": "1"},
     )
 
@@ -215,6 +217,9 @@ def _oxc_transpiler_impl(ctx):
     if ctx.attr.emit_decorator_metadata and not ctx.attr.experimental_decorators:
         fail("emit_decorator_metadata requires experimental_decorators.")
 
+    if ctx.attr.declaration_maps and not ctx.attr.emit_dts:
+        fail("declaration_maps requires emit_dts.")
+
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
     predeclared = {f.short_path: f for f in ctx.outputs.js_outs + ctx.outputs.dts_outs + ctx.outputs.json_outs}
@@ -226,6 +231,7 @@ def _oxc_transpiler_impl(ctx):
     transpile_js_outs = []  # aligned with transpile_srcs
     transpile_dts_outs = []  # aligned with transpile_srcs
     map_outs = []
+    dts_map_outs = []
 
     src_paths = lib.files_relative_to_package(ctx, ctx.files.srcs)
 
@@ -279,16 +285,18 @@ def _oxc_transpiler_impl(ctx):
                 out = _declare(ctx, predeclared, out_path)
                 dts_outs.append(out)
                 transpile_dts_outs.append(out)
+                if ctx.attr.declaration_maps:
+                    dts_map_outs.append(ctx.actions.declare_file(out_path + ".map"))
 
     if transpile_srcs:
-        _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs)
+        _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs, dts_map_outs)
 
-    # Mirror the ts_project provider shape: source maps count as sources,
-    # DefaultInfo falls back to types when no JS is emitted, declarations are
-    # exposed via JsInfo types and the "types" output group, and transitive
-    # depsets include JsInfo carried by srcs targets.
+    # Mirror the ts_project provider shape: source maps count as sources and
+    # declaration maps as types, DefaultInfo falls back to types when no JS is
+    # emitted, declarations are exposed via JsInfo types and the "types" output
+    # group, and transitive depsets include JsInfo carried by srcs targets.
     output_sources = js_outs + map_outs + json_outs
-    output_types = dts_outs
+    output_types = dts_outs + dts_map_outs
     default_outputs = output_sources if len(output_sources) else output_types
 
     src_js_infos = [src[JsInfo] for src in ctx.attr.srcs if JsInfo in src]
@@ -450,6 +458,12 @@ _oxc_transpiler_rule = rule(
                   "metadata: when False, `T | null` records T's constructor " +
                   "instead of Object.",
         ),
+        "declaration_maps": attr.bool(
+            default = False,
+            doc = "tsc's declarationMap: emit a .d.ts.map beside each " +
+                  "declaration output, exposed with the declarations as " +
+                  "types. Requires emit_dts.",
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -543,6 +557,7 @@ def oxc_transpiler(
         experimental_decorators = False,
         emit_decorator_metadata = False,
         strict_null_checks = True,
+        declaration_maps = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -578,6 +593,7 @@ def oxc_transpiler(
         emit_decorator_metadata: tsc's emitDecoratorMetadata; record design-time type metadata
             for decorated members.
         strict_null_checks: tsc's strictNullChecks, affecting only decorator metadata.
+        declaration_maps: tsc's declarationMap; emit a .d.ts.map beside each declaration.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -610,5 +626,6 @@ def oxc_transpiler(
         experimental_decorators = experimental_decorators or False,
         emit_decorator_metadata = emit_decorator_metadata or False,
         strict_null_checks = strict_null_checks,
+        declaration_maps = declaration_maps or False,
         **kwargs
     )

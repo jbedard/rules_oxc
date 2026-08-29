@@ -4,7 +4,7 @@ use oxc::ast::ast::{
     VariableDeclaration, VariableDeclarationKind,
 };
 use oxc::ast_visit::{Visit, walk};
-use oxc::codegen::{Codegen, CodegenOptions};
+use oxc::codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource, OxcDiagnostic};
 use oxc::isolated_declarations::{
     IsolatedDeclarations, IsolatedDeclarationsOptions as OxcIsolatedDeclarationsOptions,
@@ -40,6 +40,10 @@ struct Options {
     // its rootDir here; the Bazel rule passes the root_dir. Without it sources stay relative to
     // the map, which is only correct when the map sits in that root.
     source_root_dir: Option<PathBuf>,
+    // tsc's removeComments: drop comments from the JS and declaration outputs, keeping legal
+    // comments (`/*!`, @license, @preserve) like tsc and the annotations tooling relies on
+    // (`/* @__PURE__ */` and friends).
+    remove_comments: bool,
     // The "automatic" or "classic" runtime of the JSX transform (tsc's jsx=react-jsx and
     // jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under Node, and a
     // JSX-aware bundler consumes the .tsx sources directly.
@@ -148,6 +152,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 cli.options.source_root_dir =
                     Some(PathBuf::from(flag_value(&mut args, &arg, "a directory path")?));
             }
+            "--remove-comments" => cli.options.remove_comments = true,
             "--cpus" => {
                 let value = flag_value(&mut args, &arg, "a positive integer")?;
                 cli.cpus = value
@@ -475,6 +480,18 @@ struct Outputs {
     dts_map: Option<String>,
 }
 
+fn codegen_options(options: &Options, source_map_path: Option<PathBuf>) -> CodegenOptions {
+    CodegenOptions {
+        source_map_path,
+        comments: if options.remove_comments {
+            CommentOptions { normal: false, jsdoc: false, ..CommentOptions::default() }
+        } else {
+            CommentOptions::default()
+        },
+        ..Default::default()
+    }
+}
+
 // Records --source-root in a codegen map. A macro rather than a function: the map type is not
 // re-exported by the oxc facade, so it is rebuilt from its parts through inference, not named.
 macro_rules! with_source_root {
@@ -685,14 +702,12 @@ fn transpile_to(
             return Err(render_errors(filename, source_text, decl_ret.diagnostics));
         }
 
-        let mut codegen = Codegen::new();
-        if options.declaration_maps {
-            codegen = codegen.with_options(CodegenOptions {
-                source_map_path: Some(dts_map_source.to_path_buf()),
-                ..Default::default()
-            });
-        }
-        let codegen_ret = codegen.build(&decl_ret.program);
+        let codegen_ret = Codegen::new()
+            .with_options(codegen_options(
+                options,
+                options.declaration_maps.then(|| dts_map_source.to_path_buf()),
+            ))
+            .build(&decl_ret.program);
         outputs.dts_code = Some(codegen_ret.code);
         outputs.dts_map = with_source_root!(codegen_ret.map, options).map(|m| m.to_json_string());
     }
@@ -730,14 +745,13 @@ fn transpile_to(
             }
         }
 
-        let mut codegen = Codegen::new();
-        if options.source_maps || options.inline_source_maps {
-            codegen = codegen.with_options(CodegenOptions {
-                source_map_path: Some(js_map_source.to_path_buf()),
-                ..Default::default()
-            });
-        }
-        let codegen_ret = codegen.build(&parser_ret.program);
+        let codegen_ret = Codegen::new()
+            .with_options(codegen_options(
+                options,
+                (options.source_maps || options.inline_source_maps)
+                    .then(|| js_map_source.to_path_buf()),
+            ))
+            .build(&parser_ret.program);
 
         outputs.js_code = Some(codegen_ret.code);
         // Only the emitted form is serialized: the data URL for inline maps, JSON otherwise.
@@ -1211,6 +1225,44 @@ mod tests {
     }
 
     // tsc's stripInternal: /** @internal */ declarations are omitted from the dts output.
+    const COMMENTED: &str = "\
+/*! legal */
+// note
+/** Doc for x. */
+export const x: number = 1;
+";
+
+    #[test]
+    fn comments_kept_by_default() {
+        let outputs = transpile("a.ts", COMMENTED, &default_options()).unwrap();
+        let js = outputs.js_code.unwrap();
+        assert!(js.contains("// note"), "js: {js}");
+        assert!(js.contains("/** Doc for x. */"), "js: {js}");
+        let dts = outputs.dts_code.unwrap();
+        assert!(dts.contains("/** Doc for x. */"), "dts: {dts}");
+    }
+
+    // tsc's removeComments strips everything but legal comments, from the declarations too.
+    #[test]
+    fn remove_comments_strips_all_but_legal_comments() {
+        let options = Options { remove_comments: true, ..default_options() };
+        let outputs = transpile("a.ts", COMMENTED, &options).unwrap();
+        let js = outputs.js_code.unwrap();
+        assert!(js.contains("/*! legal */"), "js: {js}");
+        assert!(!js.contains("note"), "js: {js}");
+        assert!(!js.contains("Doc for x"), "js: {js}");
+        let dts = outputs.dts_code.unwrap();
+        assert!(!dts.contains("Doc for x"), "dts: {dts}");
+    }
+
+    // Annotations are not comments to tooling: the JSX transform's pure markers survive.
+    #[test]
+    fn remove_comments_keeps_pure_annotations() {
+        let options = Options { remove_comments: true, ..js_options() };
+        let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
+        assert!(js.contains("/* @__PURE__ */"), "js: {js}");
+    }
+
     #[test]
     fn strip_internal_omits_internal_declarations() {
         let src = "/** @internal */\nexport const secret: number = 1;\nexport const open: number = 2;\n";

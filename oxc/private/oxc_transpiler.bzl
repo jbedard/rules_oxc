@@ -154,6 +154,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
         args.add("--emit-js")
         if ctx.attr.source_maps:
             args.add("--source-maps")
+        if ctx.attr.inline_source_maps:
+            args.add("--inline-source-maps")
         if ctx.attr.jsx:
             args.add("--jsx", ctx.attr.jsx)
         if ctx.attr.jsx_import_source:
@@ -186,6 +188,14 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
             args.add("--strip-internal")
         if ctx.attr.declaration_maps:
             args.add("--declaration-maps")
+    if ctx.attr.source_root:
+        args.add("--source-root", ctx.attr.source_root)
+
+        # Consumers resolve `sources` against source_root, so they are recorded
+        # relative to the root_dir rather than the map's own location.
+        root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
+        source_root_dir = "/".join([part for part in [ctx.label.package, root_dir] if part])
+        args.add("--source-root-dir", source_root_dir or ".")
     args.add("--manifest")
     args.add(manifest)
 
@@ -219,6 +229,12 @@ def _oxc_transpiler_impl(ctx):
 
     if ctx.attr.declaration_maps and not ctx.attr.emit_dts:
         fail("declaration_maps requires emit_dts.")
+
+    if ctx.attr.source_maps and ctx.attr.inline_source_maps:
+        fail("source_maps and inline_source_maps are mutually exclusive.")
+
+    if ctx.attr.source_root and not (ctx.attr.source_maps or ctx.attr.inline_source_maps or ctx.attr.declaration_maps):
+        fail("source_root requires source_maps, inline_source_maps or declaration_maps.")
 
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
@@ -458,6 +474,19 @@ _oxc_transpiler_rule = rule(
                   "metadata: when False, `T | null` records T's constructor " +
                   "instead of Object.",
         ),
+        "inline_source_maps": attr.bool(
+            default = False,
+            doc = "tsc's inlineSourceMap: embed each JS output's source map " +
+                  "as a data URL in its sourceMappingURL comment instead of " +
+                  "writing a .js.map. Exclusive with source_maps.",
+        ),
+        "source_root": attr.string(
+            doc = "tsc's sourceRoot: the sourceRoot recorded in every JS and " +
+                  "declaration source map. The map sources are then recorded " +
+                  "relative to root_dir, since consumers resolve them against " +
+                  "the sourceRoot instead of the map's location. Requires " +
+                  "source_maps, inline_source_maps or declaration_maps.",
+        ),
         "declaration_maps": attr.bool(
             default = False,
             doc = "tsc's declarationMap: emit a .d.ts.map beside each " +
@@ -558,6 +587,8 @@ def oxc_transpiler(
         emit_decorator_metadata = False,
         strict_null_checks = True,
         declaration_maps = False,
+        inline_source_maps = False,
+        source_root = "",
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -594,6 +625,8 @@ def oxc_transpiler(
             for decorated members.
         strict_null_checks: tsc's strictNullChecks, affecting only decorator metadata.
         declaration_maps: tsc's declarationMap; emit a .d.ts.map beside each declaration.
+        inline_source_maps: tsc's inlineSourceMap; embed the JS source maps as data URLs.
+        source_root: tsc's sourceRoot; the sourceRoot recorded in every source map.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -627,5 +660,7 @@ def oxc_transpiler(
         emit_decorator_metadata = emit_decorator_metadata or False,
         strict_null_checks = strict_null_checks,
         declaration_maps = declaration_maps or False,
+        inline_source_maps = inline_source_maps or False,
+        source_root = source_root or "",
         **kwargs
     )

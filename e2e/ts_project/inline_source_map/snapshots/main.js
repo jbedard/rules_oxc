@@ -1,0 +1,16 @@
+export const greeting = "hello";
+export function add(a, b) {
+	return a + b;
+}
+export class Vec {
+	x;
+	y;
+	constructor(x, y) {
+		this.x = x;
+		this.y = y;
+	}
+	length() {
+		return Math.sqrt(this.x * this.x + this.y * this.y);
+	}
+}
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VSb290IjoiL3NyYyIsIm5hbWVzIjpbXSwic291cmNlcyI6WyJtYWluLnRzIl0sInNvdXJjZXNDb250ZW50IjpbImV4cG9ydCBjb25zdCBncmVldGluZzogc3RyaW5nID0gXCJoZWxsb1wiO1xuXG5leHBvcnQgZnVuY3Rpb24gYWRkKGE6IG51bWJlciwgYjogbnVtYmVyKTogbnVtYmVyIHtcbiAgcmV0dXJuIGEgKyBiO1xufVxuXG5leHBvcnQgaW50ZXJmYWNlIFBvaW50IHtcbiAgeDogbnVtYmVyO1xuICB5OiBudW1iZXI7XG59XG5cbmV4cG9ydCBjbGFzcyBWZWMgaW1wbGVtZW50cyBQb2ludCB7XG4gIGNvbnN0cnVjdG9yKFxuICAgIHB1YmxpYyB4OiBudW1iZXIsXG4gICAgcHVibGljIHk6IG51bWJlcixcbiAgKSB7fVxuXG4gIGxlbmd0aCgpOiBudW1iZXIge1xuICAgIHJldHVybiBNYXRoLnNxcnQodGhpcy54ICogdGhpcy54ICsgdGhpcy55ICogdGhpcy55KTtcbiAgfVxufVxuIl0sIm1hcHBpbmdzIjoiQUFBQSxPQUFPLE1BQU0sV0FBbUI7QUFFaEMsT0FBTyxTQUFTLElBQUksR0FBVyxHQUFtQjtDQUNoRCxPQUFPLElBQUk7QUFDYjtBQU9BLE9BQU8sTUFBTSxJQUFxQjtDQUV2QjtDQUNBO0NBRlQsWUFDRSxBQUFPLEdBQ1AsQUFBTyxHQUNQO0VBRk87RUFDQTtDQUNOO0NBRUgsU0FBaUI7RUFDZixPQUFPLEtBQUssS0FBSyxLQUFLLElBQUksS0FBSyxJQUFJLEtBQUssSUFBSSxLQUFLLENBQUM7Q0FDcEQ7QUFDRiJ9

@@ -174,6 +174,12 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--use-define-for-class-fields")
         if ctx.attr.verbatim_module_syntax:
             args.add("--only-remove-type-imports")
+        if ctx.attr.experimental_decorators:
+            args.add("--experimental-decorators")
+        if ctx.attr.emit_decorator_metadata:
+            args.add("--emit-decorator-metadata")
+        if not ctx.attr.strict_null_checks:
+            args.add("--no-strict-null-checks")
     if emit_dts:
         args.add("--emit-dts")
         if ctx.attr.strip_internal:
@@ -205,6 +211,9 @@ def _oxc_transpiler_impl(ctx):
 
     if (ctx.attr.jsx_factory or ctx.attr.jsx_fragment_factory) and ctx.attr.jsx != "classic":
         fail("jsx_factory and jsx_fragment_factory require jsx = \"classic\".")
+
+    if ctx.attr.emit_decorator_metadata and not ctx.attr.experimental_decorators:
+        fail("emit_decorator_metadata requires experimental_decorators.")
 
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
@@ -419,6 +428,28 @@ _oxc_transpiler_rule = rule(
                   "tsc's jsxFragmentFactory; React.Fragment by default. Only " +
                   "applies to jsx = \"classic\".",
         ),
+        "experimental_decorators": attr.bool(
+            default = False,
+            doc = "tsc's experimentalDecorators: compile decorators with the " +
+                  "legacy (pre-TC39) transform, calling the decorate helpers " +
+                  "imported from helpers_module. Without it decorators are " +
+                  "emitted as written, since oxc has no transform for the " +
+                  "standard proposal.",
+        ),
+        "emit_decorator_metadata": attr.bool(
+            default = False,
+            doc = "tsc's emitDecoratorMetadata: record design:type, " +
+                  "design:paramtypes and design:returntype metadata for " +
+                  "decorated members through Reflect.metadata, so a " +
+                  "reflect-metadata polyfill must be loaded at runtime. " +
+                  "Requires experimental_decorators.",
+        ),
+        "strict_null_checks": attr.bool(
+            default = True,
+            doc = "tsc's strictNullChecks, which only affects decorator " +
+                  "metadata: when False, `T | null` records T's constructor " +
+                  "instead of Object.",
+        ),
         "rewrite_extensions": attr.bool(
             default = False,
             doc = "Rewrite import/export specifiers that end in '.ts', '.tsx', " +
@@ -509,6 +540,9 @@ def oxc_transpiler(
         jsx_import_source = "",
         jsx_factory = "",
         jsx_fragment_factory = "",
+        experimental_decorators = False,
+        emit_decorator_metadata = False,
+        strict_null_checks = True,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -539,6 +573,11 @@ def oxc_transpiler(
         jsx_factory: function the classic runtime compiles elements to, tsc's jsxFactory.
         jsx_fragment_factory: expression the classic runtime compiles fragments to, tsc's
             jsxFragmentFactory.
+        experimental_decorators: tsc's experimentalDecorators; compile decorators with the
+            legacy transform.
+        emit_decorator_metadata: tsc's emitDecoratorMetadata; record design-time type metadata
+            for decorated members.
+        strict_null_checks: tsc's strictNullChecks, affecting only decorator metadata.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -568,5 +607,8 @@ def oxc_transpiler(
         jsx_import_source = jsx_import_source or "",
         jsx_factory = jsx_factory or "",
         jsx_fragment_factory = jsx_fragment_factory or "",
+        experimental_decorators = experimental_decorators or False,
+        emit_decorator_metadata = emit_decorator_metadata or False,
+        strict_null_checks = strict_null_checks,
         **kwargs
     )

@@ -931,6 +931,44 @@ diff_test(
     file2 = "snapshots/internal_stripped.d.ts",
 )
 
+# Decorators are emitted as written by default. experimental_decorators compiles
+# them with the legacy transform (helper calls imported from helpers_module),
+# emit_decorator_metadata adds the design:* metadata, and strict_null_checks
+# = False records the non-null constructor for nullable unions in that
+# metadata. Declarations are unaffected throughout.
+[
+    (
+        oxc_transpiler(
+            name = "transpile_decorators_" + name,
+            srcs = ["src/decorated.ts"],
+            emit_decorator_metadata = metadata,
+            emit_dts = True,
+            experimental_decorators = experimental,
+            helpers_module = helpers_module,
+            out_dir = "decorators_" + name,
+            root_dir = "src",
+            strict_null_checks = strict,
+        ),
+        diff_test(
+            name = "decorators_" + name + "_test",
+            file1 = "decorators_" + name + "/decorated.js",
+            file2 = "snapshots/decorated_" + name + ".js",
+        ),
+        diff_test(
+            name = "decorators_" + name + "_dts_test",
+            file1 = "decorators_" + name + "/decorated.d.ts",
+            file2 = "snapshots/decorated.d.ts",
+        ),
+    )
+    for name, experimental, metadata, strict, helpers_module in [
+        ("kept", False, False, True, ""),
+        ("legacy", True, False, True, ""),
+        ("legacy_helpers", True, False, True, "custom-helpers"),
+        ("metadata", True, True, True, ""),
+        ("metadata_nullable", True, True, False, ""),
+    ]
+]
+
 # module = "commonjs": TypeScript's CommonJS-specific syntax is rewritten (`export =` to
 # module.exports, `import x = require(...)` to a require call) and "use strict" is added. ESM
 # syntax in srcs would be an error: oxc has no ESM-to-CommonJS transform.

@@ -1111,6 +1111,85 @@ diff_test(
     ]
 ]
 
+# declaration_maps: each declaration gains a sourceMappingURL comment and a
+# sibling .d.ts.map (or .d.mts.map) exposed as types, independent of
+# source_maps; JS outputs are untouched. The maps are not pre-declared, so
+# they are selected from the target's "types" output group.
+oxc_transpiler(
+    name = "transpile_declaration_maps",
+    srcs = [
+        "src/main.ts",
+        "src/sub/index.ts",
+        "src/util.mts",
+    ],
+    declaration_dir = "dmaps/types",
+    declaration_maps = True,
+    emit_dts = True,
+    out_dir = "dmaps/code",
+    root_dir = "src",
+)
+
+filegroup(
+    name = "declaration_maps_types",
+    srcs = [":transpile_declaration_maps"],
+    output_group = "types",
+)
+
+diff_test(
+    name = "declaration_maps_js_test",
+    file1 = "dmaps/code/main.js",
+    file2 = "snapshots/main.js",
+)
+
+diff_test(
+    name = "declaration_maps_dts_test",
+    file1 = "dmaps/types/main.d.ts",
+    file2 = "snapshots/main_with_map.d.ts",
+)
+
+[
+    (
+        select_file(
+            name = "declaration_maps_" + name.replace(".", "_").replace("/", "_"),
+            srcs = ":declaration_maps_types",
+            subpath = "dmaps/types/" + name,
+        ),
+        diff_test(
+            name = "declaration_maps_" + name.replace(".", "_").replace("/", "_") + "_test",
+            file1 = ":declaration_maps_" + name.replace(".", "_").replace("/", "_"),
+            file2 = "snapshots/" + name,
+        ),
+    )
+    for name in [
+        "main.d.ts.map",
+        "util.d.mts.map",
+        "sub/index.d.ts.map",
+    ]
+]
+
+# declaration_maps with emit_js = False: the declaration_transpiler shape, where
+# the maps are the target's only outputs besides the declarations.
+oxc_transpiler(
+    name = "transpile_declaration_maps_dts_only",
+    srcs = ["src/main.ts"],
+    declaration_maps = True,
+    emit_dts = True,
+    emit_js = False,
+    out_dir = "dmapsonly",
+    root_dir = "src",
+)
+
+select_file(
+    name = "declaration_maps_dts_only_map",
+    srcs = ":transpile_declaration_maps_dts_only",
+    subpath = "dmapsonly/main.d.ts.map",
+)
+
+build_test(
+    name = "declaration_maps_dts_only_test",
+    targets = [":declaration_maps_dts_only_map"],
+)
+
 # target only downlevels the JS: the declarations are identical to those of an
 # untargeted build.
 oxc_transpiler(

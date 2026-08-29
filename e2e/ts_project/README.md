@@ -33,6 +33,8 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
   `jsx_factory` and `jsx_fragment_factory` for the classic runtime.
 - `decorators` - tsconfig `experimentalDecorators` and `emitDecoratorMetadata`
   mirrored by `experimental_decorators` and `emit_decorator_metadata`.
+- `declaration_map` - `declaration_map` mirrored by `declaration_maps` on the
+  shared transpile target.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

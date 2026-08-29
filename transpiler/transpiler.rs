@@ -14,8 +14,8 @@ use oxc::semantic::SemanticBuilder;
 use oxc::span::{GetSpan, SourceType, Span};
 use oxc::syntax::{module_record::ModuleRecord, scope::ScopeFlags};
 use oxc::transformer::{
-    CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime, Module,
-    RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, DecoratorOptions, EnvOptions, HelperLoaderOptions, JsxOptions,
+    JsxRuntime, Module, RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::io::Write;
@@ -59,6 +59,17 @@ struct Options {
     // tsc's verbatimModuleSyntax: only imports/exports marked `type` are removed, instead of
     // eliding any import that is unused after type stripping.
     only_remove_type_imports: bool,
+    // tsc's experimentalDecorators: the legacy (pre-TC39) decorator transform, emitting
+    // _decorate/_decorateParam helper calls. Without it decorators are left as written, since
+    // oxc has no transform for the standard proposal. Helpers come from the helpers module.
+    experimental_decorators: bool,
+    // tsc's emitDecoratorMetadata: design:type/paramtypes/returntype metadata via
+    // _decorateMetadata, which calls Reflect.metadata at runtime (a reflect-metadata polyfill
+    // is the caller's concern). Requires experimental_decorators.
+    emit_decorator_metadata: bool,
+    // tsc's strictNullChecks=false, which only affects decorator metadata: `T | null` records
+    // T's constructor rather than Object.
+    no_strict_null_checks: bool,
 }
 
 struct Entry {
@@ -151,6 +162,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
             "--strip-internal" => cli.options.strip_internal = true,
             "--only-remove-type-imports" => cli.options.only_remove_type_imports = true,
+            "--experimental-decorators" => cli.options.experimental_decorators = true,
+            "--emit-decorator-metadata" => cli.options.emit_decorator_metadata = true,
+            "--no-strict-null-checks" => cli.options.no_strict_null_checks = true,
             "--target" => {
                 let target = flag_value(&mut args, &arg, "a value")?;
                 // Repeats the Bazel rule's attr allowlist: only whole ES versions that oxc can
@@ -200,6 +214,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
     {
         return Err(vec![
             "error: --jsx-pragma and --jsx-pragma-frag require --jsx classic".to_string(),
+        ]);
+    }
+
+    if cli.options.emit_decorator_metadata && !cli.options.experimental_decorators {
+        return Err(vec![
+            "error: --emit-decorator-metadata requires --experimental-decorators".to_string(),
         ]);
     }
 
@@ -416,6 +436,11 @@ fn build_transform_options(options: &Options) -> TransformOptions {
                 typescript.jsx_pragma_frag = pragma_frag.clone().into();
             }
             typescript
+        },
+        decorator: DecoratorOptions {
+            legacy: options.experimental_decorators,
+            emit_decorator_metadata: options.emit_decorator_metadata,
+            strict_null_checks: !options.no_strict_null_checks,
         },
         jsx: JsxOptions {
             runtime: options.jsx,
@@ -1378,6 +1403,78 @@ mod tests {
     #[test]
     fn transpile_reports_semantic_errors() {
         transpile("a.ts", "const a = 1;\nconst a = 2;\n", &default_options()).unwrap_err();
+    }
+
+    const DECORATED: &str = "\
+function dec(_target: unknown, _key?: string): void {}
+export class C {
+  @dec
+  method(x: string | null): void {}
+}
+";
+
+    fn decorator_options() -> Options {
+        Options { experimental_decorators: true, ..js_options() }
+    }
+
+    // Without --experimental-decorators oxc has no transform to apply: decorators are emitted
+    // as written, for a runtime or bundler that understands the standard proposal.
+    #[test]
+    fn decorators_kept_without_experimental_decorators() {
+        let js = transpile_js("a.ts", DECORATED, &js_options());
+        assert!(js.contains("@dec"), "js: {js}");
+        assert!(!js.contains("_decorate"), "js: {js}");
+    }
+
+    #[test]
+    fn experimental_decorators_emit_legacy_helper_calls() {
+        let js = transpile_js("a.ts", DECORATED, &decorator_options());
+        assert!(!js.contains("@dec"), "js: {js}");
+        assert!(js.contains("_decorate([dec]"), "js: {js}");
+        assert!(js.contains("@oxc-project/runtime/helpers/decorate"), "js: {js}");
+        assert!(!js.contains("design:"), "js: {js}");
+    }
+
+    #[test]
+    fn experimental_decorators_use_helpers_module() {
+        let options = Options {
+            helpers_module: Some("custom-helpers".to_string()),
+            ..decorator_options()
+        };
+        let js = transpile_js("a.ts", DECORATED, &options);
+        assert!(js.contains("custom-helpers/helpers/decorate"), "js: {js}");
+        assert!(!js.contains("@oxc-project/runtime"), "js: {js}");
+    }
+
+    #[test]
+    fn emit_decorator_metadata_records_design_types() {
+        let options = Options { emit_decorator_metadata: true, ..decorator_options() };
+        let js = transpile_js("a.ts", DECORATED, &options);
+        assert!(js.contains("_decorateMetadata(\"design:type\", Function)"), "js: {js}");
+        assert!(js.contains("_decorateMetadata(\"design:paramtypes\", [Object])"), "js: {js}");
+        assert!(js.contains("_decorateMetadata(\"design:returntype\", void 0)"), "js: {js}");
+    }
+
+    // With strictNullChecks off, `string | null` is just string to tsc, so the metadata records
+    // String rather than the Object it uses for unions.
+    #[test]
+    fn no_strict_null_checks_unwraps_nullable_metadata() {
+        let options = Options {
+            emit_decorator_metadata: true,
+            no_strict_null_checks: true,
+            ..decorator_options()
+        };
+        let js = transpile_js("a.ts", DECORATED, &options);
+        assert!(js.contains("_decorateMetadata(\"design:paramtypes\", [String])"), "js: {js}");
+    }
+
+    #[test]
+    fn run_rejects_metadata_without_experimental_decorators() {
+        let err = run(args(&["--emit-js", "--emit-decorator-metadata"])).unwrap_err();
+        assert_eq!(
+            err,
+            vec!["error: --emit-decorator-metadata requires --experimental-decorators".to_string()]
+        );
     }
 
     #[test]

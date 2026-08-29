@@ -25,9 +25,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 
-#[derive(Clone)]
+#[derive(Default)]
 struct Options {
-    cpus: usize,
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
@@ -64,28 +63,6 @@ struct Options {
     only_remove_type_imports: bool,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            cpus: 1,
-            emit_js: false,
-            emit_dts: false,
-            source_maps: false,
-            jsx: JsxRuntime::Automatic,
-            rewrite_extensions: false,
-            env: None,
-            helpers_module: None,
-            module: Module::Preserve,
-            jsx_import_source: None,
-            jsx_pragma: None,
-            jsx_pragma_frag: None,
-            use_define_for_class_fields: false,
-            strip_internal: false,
-            only_remove_type_imports: false,
-        }
-    }
-}
-
 struct Entry {
     src: String,
     js_out: Option<String>,
@@ -111,9 +88,9 @@ fn flag_value(
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
-    let Cli { options, manifest_path, positional } = parse_args(args)?;
+    let Cli { options, cpus, manifest_path, positional } = parse_args(args)?;
     let entries = read_entries(&options, manifest_path, positional)?;
-    transpile_entries(&options, &entries)
+    transpile_entries(&options, cpus, &entries)
 }
 
 const SUPPORTED_TARGETS: [&str; 14] = [
@@ -123,6 +100,7 @@ const SUPPORTED_TARGETS: [&str; 14] = [
 
 struct Cli {
     options: Options,
+    cpus: usize,
     manifest_path: Option<String>,
     positional: Vec<String>,
 }
@@ -130,6 +108,7 @@ struct Cli {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>> {
     let mut cli = Cli {
         options: Options::default(),
+        cpus: 1,
         manifest_path: None,
         positional: Vec::new(),
     };
@@ -141,7 +120,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--source-maps" => cli.options.source_maps = true,
             "--cpus" => {
                 let value = flag_value(&mut args, &arg, "a positive integer")?;
-                cli.options.cpus = value
+                cli.cpus = value
                     .parse()
                     .ok()
                     .filter(|cpus: &usize| *cpus > 0)
@@ -184,10 +163,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                         "error: unsupported --target \"{target}\": expected es6, es2015..es2026, or esnext"
                     )]);
                 }
-                cli.options.env = Some(
-                    EnvOptions::from_target(&target)
-                        .map_err(|e| vec![format!("error: invalid --target \"{target}\": {e}")])?,
-                );
+                cli.options.env = Some(EnvOptions::from_target(&target).expect("allowlisted target"));
             }
             "--helpers-module" => {
                 cli.options.helpers_module = Some(flag_value(&mut args, &arg, "a value")?);
@@ -264,33 +240,26 @@ fn read_entries(
         )]);
     }
 
-    Ok(lines
-        .chunks(entry_width)
-        .map(|chunk| {
-            let mut outs = chunk[1..].iter();
-            Entry {
-                src: chunk[0].clone(),
-                js_out: options
-                    .emit_js
-                    .then(|| outs.next().unwrap().clone())
-                    .filter(|out| !out.is_empty()),
-                dts_out: options
-                    .emit_dts
-                    .then(|| outs.next().unwrap().clone())
-                    .filter(|out| !out.is_empty()),
-            }
-        })
-        .collect())
+    let mut lines = lines.into_iter();
+    let mut entries = Vec::new();
+    while let Some(src) = lines.next() {
+        let mut output =
+            |emit: bool| emit.then(|| lines.next().unwrap()).filter(|out| !out.is_empty());
+        let js_out = output(options.emit_js);
+        let dts_out = output(options.emit_dts);
+        entries.push(Entry { src, js_out, dts_out });
+    }
+    Ok(entries)
 }
 
 // Transpiles and writes every entry, with up to --cpus entries in flight at once. Failures do
 // not prevent other entries from being processed, so all errors are reported in one pass, in
 // manifest order. Outputs from entries that completed before a failure are intentionally
 // retained rather than buffering every generated file in memory.
-fn transpile_entries(options: &Options, entries: &[Entry]) -> Result<(), Vec<String>> {
+fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Result<(), Vec<String>> {
     let next = AtomicUsize::new(0);
     let mut errors: Vec<(usize, Vec<String>)> = thread::scope(|scope| {
-        let workers: Vec<_> = (0..options.cpus.min(entries.len()))
+        let workers: Vec<_> = (0..cpus.min(entries.len()))
             .map(|_| {
                 scope.spawn(|| {
                     let mut errors = Vec::new();
@@ -327,34 +296,31 @@ fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
         Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
     };
 
-    let entry_options = Options {
-        emit_js: entry.js_out.is_some(),
-        emit_dts: entry.dts_out.is_some(),
-        ..options.clone()
-    };
     // Source map consumers resolve `sources` against the map's own location.
     let map_source = entry
         .js_out
         .as_deref()
         .and_then(|out| Path::new(out).parent())
         .map(|out_dir| relative_to(Path::new(&entry.src), out_dir));
-    let result = transpile_to(
+    let outputs = match transpile_to(
         &entry.src,
         &content,
-        &entry_options,
+        options,
+        entry.js_out.is_some(),
+        entry.dts_out.is_some(),
         map_source.as_deref().unwrap_or(Path::new(&entry.src)),
-    );
-    if !result.errors.is_empty() {
-        return result.errors;
-    }
+    ) {
+        Ok(outputs) => outputs,
+        Err(errors) => return errors,
+    };
 
     let mut errors = Vec::new();
-    if let (Some(js_out), Some(code)) = (&entry.js_out, result.js_code) {
-        if let Err(e) = write_output(js_out, &code, result.js_map.as_deref()) {
+    if let (Some(js_out), Some(code)) = (&entry.js_out, outputs.js_code) {
+        if let Err(e) = write_output(js_out, &code, outputs.js_map.as_deref()) {
             errors.push(format!("error: cannot write {js_out}: {e}"));
         }
     }
-    if let (Some(dts_out), Some(code)) = (&entry.dts_out, result.dts_code) {
+    if let (Some(dts_out), Some(code)) = (&entry.dts_out, outputs.dts_code) {
         if let Err(e) = write_output(dts_out, &code, None) {
             errors.push(format!("error: cannot write {dts_out}: {e}"));
         }
@@ -367,11 +333,10 @@ fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()
     let mut file = fs::File::create(out)?;
     file.write_all(code.as_bytes())?;
     if let Some(map) = map {
-        let name = out.file_name().ok_or_else(|| std::io::Error::other("path has no file name"))?;
         if !code.ends_with('\n') {
             file.write_all(b"\n")?;
         }
-        write!(file, "//# sourceMappingURL={}.map", name.to_string_lossy())?;
+        write!(file, "//# sourceMappingURL={}.map", out.file_name().unwrap().to_string_lossy())?;
         fs::write(format!("{path}.map"), map)?;
     }
     Ok(())
@@ -402,12 +367,11 @@ fn is_declaration_file(path: &str) -> bool {
     path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
-#[derive(Default)]
-struct TranspileResult {
+#[derive(Debug, Default)]
+struct Outputs {
     js_code: Option<String>,
     js_map: Option<String>,
     dts_code: Option<String>,
-    errors: Vec<String>,
 }
 
 fn build_transform_options(options: &Options) -> TransformOptions {
@@ -458,12 +422,12 @@ fn build_transform_options(options: &Options) -> TransformOptions {
         },
         // Helpers are imported like tsc's importHelpers (oxc's only implemented mode);
         // --helpers-module redirects the imports away from the default @oxc-project/runtime.
-        helper_loader: HelperLoaderOptions {
-            module_name: match &options.helpers_module {
-                Some(name) => name.clone().into(),
-                None => HelperLoaderOptions::default().module_name,
-            },
-            ..Default::default()
+        helper_loader: {
+            let mut helper_loader = HelperLoaderOptions::default();
+            if let Some(name) = &options.helpers_module {
+                helper_loader.module_name = name.clone().into();
+            }
+            helper_loader
         },
         ..Default::default()
     }
@@ -559,7 +523,14 @@ fn render_errors(
 // Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
 // first, before the transformer mutates the program. `map_source` is the path recorded in the
 // source map's `sources`.
-fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source: &Path) -> TranspileResult {
+fn transpile_to(
+    filename: &str,
+    source_text: &str,
+    options: &Options,
+    emit_js: bool,
+    emit_dts: bool,
+    map_source: &Path,
+) -> Result<Outputs, Vec<String>> {
     // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
     let source_type = SourceType::from_path(filename)
         .unwrap_or_default()
@@ -568,14 +539,13 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
     let allocator = Allocator::default();
     let mut parser_ret = Parser::new(&allocator, source_text, source_type).parse();
 
-    let mut result = TranspileResult::default();
+    let mut outputs = Outputs::default();
 
     if !parser_ret.diagnostics.is_empty() {
-        result.errors = render_errors(filename, source_text, parser_ret.diagnostics);
-        return result;
+        return Err(render_errors(filename, source_text, parser_ret.diagnostics));
     }
 
-    if options.emit_dts {
+    if emit_dts {
         let decl_ret = IsolatedDeclarations::new(
             &allocator,
             OxcIsolatedDeclarationsOptions {
@@ -585,14 +555,13 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
         .build(&parser_ret.program);
 
         if !decl_ret.diagnostics.is_empty() {
-            result.errors = render_errors(filename, source_text, decl_ret.diagnostics);
-            return result;
+            return Err(render_errors(filename, source_text, decl_ret.diagnostics));
         }
 
-        result.dts_code = Some(Codegen::new().build(&decl_ret.program).code);
+        outputs.dts_code = Some(Codegen::new().build(&decl_ret.program).code);
     }
 
-    if options.emit_js {
+    if emit_js {
         // oxc's own compiler configuration: the transformer needs pre-evaluated enum member
         // values (string members are otherwise given reverse mappings), and roughly triples the
         // scope and symbol counts.
@@ -613,8 +582,7 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
             .chain(transformer_ret.diagnostics)
             .collect();
         if !diagnostics.is_empty() {
-            result.errors = render_errors(filename, source_text, diagnostics);
-            return result;
+            return Err(render_errors(filename, source_text, diagnostics));
         }
 
         if options.module.is_commonjs() {
@@ -624,11 +592,9 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
             let diagnostics =
                 commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
             if !diagnostics.is_empty() {
-                result.errors = render_errors(filename, source_text, diagnostics);
-                return result;
+                return Err(render_errors(filename, source_text, diagnostics));
             }
         }
-
 
         let mut codegen = Codegen::new();
         if options.source_maps {
@@ -639,11 +605,11 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
         }
         let codegen_ret = codegen.build(&parser_ret.program);
 
-        result.js_code = Some(codegen_ret.code);
-        result.js_map = codegen_ret.map.map(|m| m.to_json_string());
+        outputs.js_code = Some(codegen_ret.code);
+        outputs.js_map = codegen_ret.map.map(|m| m.to_json_string());
     }
 
-    result
+    Ok(outputs)
 }
 
 
@@ -651,7 +617,7 @@ fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source
 mod tests {
     use super::*;
 
-    pub(crate) fn test_dir(name: &str) -> PathBuf {
+    fn test_dir(name: &str) -> PathBuf {
         let base = std::env::var_os("TEST_TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -672,8 +638,13 @@ mod tests {
         fs::read_to_string(path).unwrap()
     }
 
-    fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
-        transpile_to(filename, source_text, options, Path::new(filename))
+    fn transpile(
+        filename: &str,
+        source_text: &str,
+        options: &Options,
+    ) -> Result<Outputs, Vec<String>> {
+        let Options { emit_js, emit_dts, .. } = *options;
+        transpile_to(filename, source_text, options, emit_js, emit_dts, Path::new(filename))
     }
 
     fn default_options() -> Options {
@@ -701,9 +672,7 @@ mod tests {
 
     // JS output of a successful transpile; panics with the rendered errors otherwise.
     fn transpile_js(filename: &str, source_text: &str, options: &Options) -> String {
-        let result = transpile(filename, source_text, options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        result.js_code.unwrap()
+        transpile(filename, source_text, options).unwrap().js_code.unwrap()
     }
 
     #[test]
@@ -834,28 +803,26 @@ mod tests {
     // instead of rewriting it.
     #[test]
     fn esm_rejects_export_assignment() {
-        let result = transpile("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
-        assert!(!result.errors.is_empty());
+        let errors =
+            transpile("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options()).unwrap_err();
         assert!(
-            result.errors.concat().contains("Export assignment cannot be used"),
+            errors.concat().contains("Export assignment cannot be used"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     #[test]
     fn esm_rejects_import_equals() {
-        let result = transpile(
+        let errors = transpile(
             "a.ts",
             "import path = require(\"node:path\");\nexport const s: string = path.sep;\n",
             &esm_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors.concat().contains("Import assignment cannot be used"),
+            errors.concat().contains("Import assignment cannot be used"),
             "errors: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -908,78 +875,71 @@ mod tests {
     // matched by the empty-export drop, and is rejected like any other ESM syntax.
     #[test]
     fn commonjs_rejects_sourced_empty_export() {
-        let result = transpile(
+        let errors = transpile(
             "a.cts",
             "const x: number = 1;\nexport = x;\nexport {} from \"./setup.cjs\";\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("cannot be emitted as CommonJS"),
+            errors[0].contains("cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     #[test]
     fn commonjs_rejects_esm_import() {
-        let result = transpile(
+        let errors = transpile(
             "a.cts",
             "import { x } from \"./b.cjs\";\nexport = x;\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("cannot be emitted as CommonJS"),
+            errors[0].contains("cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     #[test]
     fn commonjs_rejects_esm_export() {
-        let result = transpile("a.cts", "export const x: number = 1;\n", &commonjs_options());
-        assert!(!result.errors.is_empty());
+        let errors =
+            transpile("a.cts", "export const x: number = 1;\n", &commonjs_options()).unwrap_err();
         assert!(
-            result.errors[0].contains("cannot be emitted as CommonJS"),
+            errors[0].contains("cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
     }
 
     // Uses a .ts source: the parser already rejects top-level await in .cts files.
     #[test]
     fn commonjs_rejects_top_level_await() {
-        let result = transpile(
+        let errors = transpile(
             "a.ts",
             "async function load(): Promise<number> { return 1; }\n\
              const value: number = await load();\nexport = value;\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            errors[0].contains("top-level await cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     #[test]
     fn commonjs_rejects_top_level_for_await() {
-        let result = transpile(
+        let errors = transpile(
             "a.ts",
             "declare const items: AsyncIterable<number>;\nfor await (const item of items) {\n}\n\
              export = 1;\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            errors[0].contains("top-level await cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -998,18 +958,16 @@ mod tests {
     // `await using` at module scope is top-level await too.
     #[test]
     fn commonjs_rejects_top_level_await_using() {
-        let result = transpile(
+        let errors = transpile(
             "a.ts",
             "declare const r: AsyncDisposable;\nawait using x = r;\nexport = x;\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            errors[0].contains("top-level await cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     #[test]
@@ -1027,18 +985,16 @@ mod tests {
     // record; Node rejects it in CommonJS files. (.ts source: the parser already rejects it in .cts.)
     #[test]
     fn commonjs_rejects_import_meta() {
-        let result = transpile(
+        let errors = transpile(
             "a.ts",
             "const url: string = import.meta.url;\nexport = url;\n",
             &commonjs_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
         assert!(
-            result.errors[0].contains("import.meta cannot be emitted as CommonJS"),
+            errors[0].contains("import.meta cannot be emitted as CommonJS"),
             "errors: {:?}",
-            result.errors
+            errors
         );
-        assert!(result.js_code.is_none());
     }
 
     // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that in
@@ -1094,8 +1050,7 @@ mod tests {
             "a.ts",
             "export function add(a: number, b: number): number { return a + b; }\n",
             &default_options(),
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        ).unwrap();
         let dts = result.dts_code.unwrap();
         assert!(
             dts.contains("export declare function add(a: number, b: number): number"),
@@ -1108,16 +1063,14 @@ mod tests {
     #[test]
     fn strip_internal_omits_internal_declarations() {
         let src = "/** @internal */\nexport const secret: number = 1;\nexport const open: number = 2;\n";
-        let kept = transpile("a.ts", src, &default_options());
-        assert!(kept.errors.is_empty(), "errors: {:?}", kept.errors);
+        let kept = transpile("a.ts", src, &default_options()).unwrap();
         assert!(kept.dts_code.unwrap().contains("secret"));
 
         let options = Options {
             strip_internal: true,
             ..default_options()
         };
-        let stripped = transpile("a.ts", src, &options);
-        assert!(stripped.errors.is_empty(), "errors: {:?}", stripped.errors);
+        let stripped = transpile("a.ts", src, &options).unwrap();
         let dts = stripped.dts_code.unwrap();
         assert!(!dts.contains("secret"), "dts: {dts}");
         assert!(dts.contains("open"), "dts: {dts}");
@@ -1128,8 +1081,8 @@ mod tests {
     #[test]
     fn only_remove_type_imports_keeps_unused_imports() {
         let src = "import { sideEffect } from \"./fx.js\";\nimport type { T } from \"./t.js\";\nexport const x: number = 1;\n";
-        let elided = transpile("a.ts", src, &Options { emit_dts: false, ..default_options() });
-        assert!(elided.errors.is_empty(), "errors: {:?}", elided.errors);
+        let elided =
+            transpile("a.ts", src, &Options { emit_dts: false, ..default_options() }).unwrap();
         let js = elided.js_code.unwrap();
         assert!(!js.contains("./fx.js"), "js: {js}");
 
@@ -1138,8 +1091,7 @@ mod tests {
             only_remove_type_imports: true,
             ..default_options()
         };
-        let kept = transpile("a.ts", src, &options);
-        assert!(kept.errors.is_empty(), "errors: {:?}", kept.errors);
+        let kept = transpile("a.ts", src, &options).unwrap();
         let js = kept.js_code.unwrap();
         assert!(js.contains("import { sideEffect } from \"./fx.js\""), "js: {js}");
         assert!(!js.contains("./t.js"), "js: {js}");
@@ -1147,21 +1099,17 @@ mod tests {
 
     #[test]
     fn transpile_reports_parse_errors() {
-        let result = transpile("bad.ts", "const = ;", &default_options());
-        assert!(!result.errors.is_empty());
-        assert!(result.js_code.is_none());
-        assert!(result.dts_code.is_none());
+        transpile("bad.ts", "const = ;", &default_options()).unwrap_err();
     }
 
     #[test]
     fn transpile_reports_isolated_declaration_errors() {
         // Inferred return type is not allowed under isolated declarations.
-        let result = transpile(
+        transpile(
             "a.ts",
             "export function f() { return someValue(); }\nfunction someValue() { return 1; }\n",
             &default_options(),
-        );
-        assert!(!result.errors.is_empty());
+        ).unwrap_err();
     }
 
     #[test]
@@ -1188,8 +1136,7 @@ mod tests {
             "a.ts",
             "export class C { declared: number; assigned = 1; }\n",
             &options,
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        ).unwrap();
         let js = result.js_code.unwrap();
         assert!(js.contains("declared"), "js: {js}");
         assert!(js.contains("assigned = 1"), "js: {js}");
@@ -1201,16 +1148,14 @@ mod tests {
             source_maps: true,
             ..default_options()
         };
-        let result = transpile("a.ts", "export const x: number = 1;\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let result = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
         let map = result.js_map.unwrap();
         assert!(map.contains("\"a.ts\""), "map: {map}");
     }
 
     #[test]
     fn transpile_plain_js() {
-        let result = transpile("a.js", "export const x = 1;\n", &js_options());
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let result = transpile("a.js", "export const x = 1;\n", &js_options()).unwrap();
         let js = result.js_code.unwrap();
         assert!(js.contains("export const x = 1"), "js: {js}");
         assert!(result.dts_code.is_none());
@@ -1249,8 +1194,7 @@ mod tests {
             jsx_import_source: Some("preact".to_string()),
             ..default_options()
         };
-        let result = transpile("a.tsx", "export const el = <div />;\n", &options);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let result = transpile("a.tsx", "export const el = <div />;\n", &options).unwrap();
         let js = result.js_code.unwrap();
         assert!(js.contains("\"preact/jsx-runtime\""), "js: {js}");
         assert!(!js.contains("\"react/jsx-runtime\""), "js: {js}");
@@ -1271,8 +1215,7 @@ mod tests {
             "a.tsx",
             "import { h, Fragment } from \"preact\";\nexport const el = <div><span /></div>;\nexport const frag = <></>;\n",
             &options,
-        );
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        ).unwrap();
         let js = result.js_code.unwrap();
         assert!(js.contains("h(\"div\""), "js: {js}");
         assert!(js.contains("h(Fragment"), "js: {js}");
@@ -1413,20 +1356,18 @@ mod tests {
 
     #[test]
     fn transpile_reports_semantic_errors() {
-        let result = transpile("a.ts", "const a = 1;\nconst a = 2;\n", &default_options());
-        assert!(!result.errors.is_empty());
-        assert!(result.js_code.is_none());
+        transpile("a.ts", "const a = 1;\nconst a = 2;\n", &default_options()).unwrap_err();
     }
 
     #[test]
     fn transpile_module_variant_sources() {
-        let result = transpile("a.mts", "export const x: number = 1;\n", &default_options());
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let result =
+            transpile("a.mts", "export const x: number = 1;\n", &default_options()).unwrap();
         assert!(result.js_code.unwrap().contains("export const x = 1"));
         assert!(result.dts_code.unwrap().contains("declare const x: number"));
 
-        let result = transpile("a.cts", "export const y: number = 2;\n", &default_options());
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let result =
+            transpile("a.cts", "export const y: number = 2;\n", &default_options()).unwrap();
         assert!(result.js_code.unwrap().contains("y = 2"));
         assert!(result.dts_code.is_some());
     }

@@ -23,6 +23,8 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
   `module = "commonjs"` for `.cts` sources.
 - `use_define_for_class_fields` - tsconfig `useDefineForClassFields: false`
   mirrored by `use_define_for_class_fields = False`.
+- `verbatim_module_syntax` - tsconfig `verbatimModuleSyntax` mirrored by
+  `verbatim_module_syntax`, keeping imports unused after type stripping.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

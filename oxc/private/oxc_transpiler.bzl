@@ -166,6 +166,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs):
             args.add("--helpers-module", ctx.attr.helpers_module)
         if _use_define_for_class_fields(ctx):
             args.add("--use-define-for-class-fields")
+        if ctx.attr.verbatim_module_syntax:
+            args.add("--only-remove-type-imports")
     if emit_dts:
         args.add("--emit-dts")
     args.add("--manifest")
@@ -408,6 +410,14 @@ _oxc_transpiler_rule = rule(
                   "Declaration outputs are unaffected.",
             values = ["", "true", "false"],
         ),
+        "verbatim_module_syntax": attr.bool(
+            default = False,
+            doc = "tsc's verbatimModuleSyntax: only imports and exports " +
+                  "marked `type` are removed, so an import whose bindings " +
+                  "are unused after type stripping is kept for its side " +
+                  "effects. By default any such import is elided, like tsc " +
+                  "without the option.",
+        ),
         "helpers_module": attr.string(
             doc = "Module to import runtime helpers from, defaulting to " +
                   "@oxc-project/runtime. Transforms that need a helper always " +
@@ -459,6 +469,7 @@ def oxc_transpiler(
         rewrite_extensions = False,
         helpers_module = "",
         use_define_for_class_fields = None,
+        verbatim_module_syntax = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -480,6 +491,8 @@ def oxc_transpiler(
         use_define_for_class_fields: tsc's useDefineForClassFields. Defaults like tsc to
             True for target es2022 and above (including the default, esnext) and False below.
             A select() must use the strings "true" and "false".
+        verbatim_module_syntax: tsc's verbatimModuleSyntax; keep imports that are unused
+            after type stripping instead of eliding them.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -504,5 +517,6 @@ def oxc_transpiler(
         rewrite_extensions = rewrite_extensions or False,
         helpers_module = helpers_module or "",
         use_define_for_class_fields = _tristate(use_define_for_class_fields),
+        verbatim_module_syntax = verbatim_module_syntax or False,
         **kwargs
     )

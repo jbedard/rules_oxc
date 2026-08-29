@@ -1,6 +1,7 @@
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
     ArrowFunctionExpression, AwaitExpression, ForOfStatement, Function, Program, Statement,
+    VariableDeclaration, VariableDeclarationKind,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::syntax::scope::ScopeFlags;
@@ -19,7 +20,7 @@ use oxc::transformer::{
 };
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
@@ -328,7 +329,18 @@ fn transpile_entry(options: &Options, entry: &Entry) -> Vec<String> {
         emit_dts: entry.dts_out.is_some(),
         ..options.clone()
     };
-    let result = transpile(&entry.src, &content, &entry_options);
+    // Source map consumers resolve `sources` against the map's own location.
+    let map_source = entry
+        .js_out
+        .as_deref()
+        .and_then(|out| Path::new(out).parent())
+        .map(|out_dir| relative_to(Path::new(&entry.src), out_dir));
+    let result = transpile_to(
+        &entry.src,
+        &content,
+        &entry_options,
+        map_source.as_deref().unwrap_or(Path::new(&entry.src)),
+    );
     if !result.errors.is_empty() {
         return result.errors;
     }
@@ -353,10 +365,31 @@ fn write_output(path: &str, code: &str, map: Option<&str>) -> std::io::Result<()
     file.write_all(code.as_bytes())?;
     if let Some(map) = map {
         let name = out.file_name().ok_or_else(|| std::io::Error::other("path has no file name"))?;
-        write!(file, "\n//# sourceMappingURL={}.map", name.to_string_lossy())?;
+        if !code.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        write!(file, "//# sourceMappingURL={}.map", name.to_string_lossy())?;
         fs::write(format!("{path}.map"), map)?;
     }
     Ok(())
+}
+
+// `target` expressed relative to `base_dir`, with both paths relative to the same root (or both
+// absolute), as Bazel passes exec-root-relative source and output paths.
+fn relative_to(target: &Path, base_dir: &Path) -> PathBuf {
+    let mut target_parts = target.components().peekable();
+    let mut base_parts = base_dir.components().peekable();
+    loop {
+        match (target_parts.peek(), base_parts.peek()) {
+            (Some(t), Some(b)) if t == b => {}
+            _ => break,
+        }
+        target_parts.next();
+        base_parts.next();
+    }
+    let mut relative: PathBuf = base_parts.map(|_| Component::ParentDir).collect();
+    relative.extend(target_parts);
+    relative
 }
 
 // Matches the Bazel rule's _is_declaration: all three declaration extensions, so a .d.mts/.d.cts
@@ -452,6 +485,13 @@ impl<'a> Visit<'a> for TopLevelAwaitFinder {
         walk::walk_for_of_statement(self, stmt);
     }
 
+    fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
+        if decl.kind == VariableDeclarationKind::AwaitUsing {
+            self.spans.push(decl.span);
+        }
+        walk::walk_variable_declaration(self, decl);
+    }
+
     // Await inside any function belongs to that function, not the module.
     fn visit_function(&mut self, _func: &Function<'a>, _flags: ScopeFlags) {}
 
@@ -513,9 +553,14 @@ fn render_errors(
         .collect()
 }
 
-// Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
-// first, before the transformer mutates the program.
 fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileResult {
+    transpile_to(filename, source_text, options, Path::new(filename))
+}
+
+// Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
+// first, before the transformer mutates the program. `map_source` is the path recorded in the
+// source map's `sources`.
+fn transpile_to(filename: &str, source_text: &str, options: &Options, map_source: &Path) -> TranspileResult {
     // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
     let source_type = SourceType::from_path(filename)
         .unwrap_or_default()
@@ -549,7 +594,13 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
     }
 
     if options.emit_js {
-        let semantic_ret = SemanticBuilder::new().build(&parser_ret.program);
+        // oxc's own compiler configuration: the transformer needs pre-evaluated enum member
+        // values (string members are otherwise given reverse mappings), and roughly triples the
+        // scope and symbol counts.
+        let semantic_ret = SemanticBuilder::new_compiler()
+            .with_enum_eval(true)
+            .with_excess_capacity(2.0)
+            .build(&parser_ret.program);
         let semantic_diagnostics = semantic_ret.diagnostics;
         let scoping = semantic_ret.semantic.into_scoping();
 
@@ -583,7 +634,7 @@ fn transpile(filename: &str, source_text: &str, options: &Options) -> TranspileR
         let mut codegen = Codegen::new();
         if options.source_maps {
             codegen = codegen.with_options(CodegenOptions {
-                source_map_path: Some(PathBuf::from(filename)),
+                source_map_path: Some(map_source.to_path_buf()),
                 ..Default::default()
             });
         }
@@ -941,6 +992,34 @@ mod tests {
         assert!(js.contains("module.exports = g"));
     }
 
+    // `await using` at module scope is top-level await too.
+    #[test]
+    fn commonjs_rejects_top_level_await_using() {
+        let result = transpile(
+            "a.ts",
+            "declare const r: AsyncDisposable;\nawait using x = r;\nexport = x;\n",
+            &commonjs_options(),
+        );
+        assert!(!result.errors.is_empty());
+        assert!(
+            result.errors[0].contains("top-level await cannot be emitted as CommonJS"),
+            "errors: {:?}",
+            result.errors
+        );
+        assert!(result.js_code.is_none());
+    }
+
+    #[test]
+    fn commonjs_allows_await_using_inside_functions() {
+        let js = transpile_js(
+            "a.cts",
+            "declare const r: AsyncDisposable;\n\
+             async function f(): Promise<void> { await using x = r; }\nexport = f;\n",
+            &commonjs_options(),
+        );
+        assert!(js.contains("module.exports = f"), "js: {js}");
+    }
+
     // import.meta is an expression, not a module-declaration statement, so it is caught via the module
     // record; Node rejects it in CommonJS files. (.ts source: the parser already rejects it in .cts.)
     #[test]
@@ -989,6 +1068,21 @@ mod tests {
         );
         assert!(js.contains("export const x = 1"), "js: {js}");
         assert!(!js.contains("interface"), "js: {js}");
+    }
+
+    // Enum members are evaluated up front: computed numeric members get their constant value and
+    // string members get no reverse mapping, matching tsc.
+    #[test]
+    fn transpile_evaluates_enum_members() {
+        let js = transpile_js(
+            "a.ts",
+            "export enum E { A = \"a\", B = 1, C, D = \"x\" + \"y\" }\n",
+            &js_options(),
+        );
+        assert!(js.contains("E[\"A\"] = \"a\";"), "js: {js}");
+        assert!(js.contains("E[E[\"C\"] = 2] = \"C\";"), "js: {js}");
+        assert!(js.contains("E[\"D\"] = \"xy\";"), "js: {js}");
+        assert!(!js.contains("= \"D\""), "js: {js}");
     }
 
     #[test]
@@ -1541,9 +1635,26 @@ mod tests {
         ]))
         .unwrap();
         let js = read(&js_out);
-        assert!(js.ends_with("//# sourceMappingURL=a.js.map"), "js: {js}");
+        assert!(js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"), "js: {js}");
+        // The source is recorded relative to the map's directory.
         let map = read(&dir.join("out/a.js.map"));
-        assert!(map.contains("a.ts"), "map: {map}");
+        assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
+    }
+
+    #[test]
+    fn relative_to_walks_up_to_common_ancestor() {
+        assert_eq!(
+            relative_to(Path::new("pkg/src/a.ts"), Path::new("bazel-out/bin/pkg/dist")),
+            PathBuf::from("../../../../pkg/src/a.ts")
+        );
+        assert_eq!(
+            relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/src")),
+            PathBuf::from("a.ts")
+        );
+        assert_eq!(
+            relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/dist/sub")),
+            PathBuf::from("../../src/a.ts")
+        );
     }
 
     #[test]

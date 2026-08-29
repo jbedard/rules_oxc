@@ -4,7 +4,6 @@ use oxc::ast::ast::{
     VariableDeclaration, VariableDeclarationKind,
 };
 use oxc::ast_visit::{Visit, walk};
-use oxc::syntax::scope::ScopeFlags;
 use oxc::codegen::{Codegen, CodegenOptions};
 use oxc::diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource, OxcDiagnostic};
 use oxc::isolated_declarations::{
@@ -13,7 +12,7 @@ use oxc::isolated_declarations::{
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::{GetSpan, SourceType, Span};
-use oxc::syntax::module_record::ModuleRecord;
+use oxc::syntax::{module_record::ModuleRecord, scope::ScopeFlags};
 use oxc::transformer::{
     CompilerAssumptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime, Module,
     RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
@@ -23,7 +22,6 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-
 
 #[derive(Default)]
 struct Options {
@@ -459,8 +457,9 @@ impl<'a> Visit<'a> for TopLevelAwaitFinder {
     fn visit_for_of_statement(&mut self, stmt: &ForOfStatement<'a>) {
         if stmt.r#await {
             self.spans.push(stmt.span);
+        } else {
+            walk::walk_for_of_statement(self, stmt);
         }
-        walk::walk_for_of_statement(self, stmt);
     }
 
     fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
@@ -953,10 +952,11 @@ mod tests {
     fn commonjs_rejects_top_level_for_await() {
         let errors = transpile(
             "a.ts",
-            "declare const items: AsyncIterable<number>;\nfor await (const item of items) {\n}\n\
-             export = 1;\n",
+            "declare const items: AsyncIterable<Promise<number>>;\n\
+             for await (const item of items) { await item; }\nexport = 1;\n",
             &commonjs_options(),
         ).unwrap_err();
+        assert_eq!(errors.len(), 1, "errors: {errors:?}");
         assert!(
             errors[0].contains("top-level await cannot be emitted as CommonJS"),
             "errors: {:?}",

@@ -28,6 +28,8 @@ struct Options {
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
+    // tsc's declarationMap: a .d.ts.map beside each declaration output. Requires emit_dts.
+    declaration_maps: bool,
     // The "automatic" or "classic" runtime of the JSX transform (tsc's jsx=react-jsx and
     // jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under Node, and a
     // JSX-aware bundler consumes the .tsx sources directly.
@@ -127,6 +129,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--emit-js" => cli.options.emit_js = true,
             "--emit-dts" => cli.options.emit_dts = true,
             "--source-maps" => cli.options.source_maps = true,
+            "--declaration-maps" => cli.options.declaration_maps = true,
             "--cpus" => {
                 let value = flag_value(&mut args, &arg, "a positive integer")?;
                 cli.cpus = value
@@ -229,6 +232,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
         ]);
     }
 
+    if cli.options.declaration_maps && !cli.options.emit_dts {
+        return Err(vec!["error: --declaration-maps requires --emit-dts".to_string()]);
+    }
+
     Ok(cli)
 }
 
@@ -324,11 +331,12 @@ fn transpile_entry(
     };
 
     // Source map consumers resolve `sources` against the map's own location.
-    let map_source = entry
-        .js_out
-        .as_deref()
-        .and_then(|out| Path::new(out).parent())
-        .map(|out_dir| relative_to(Path::new(&entry.src), out_dir));
+    let map_source = |out: &Option<String>| {
+        out.as_deref()
+            .and_then(|out| Path::new(out).parent())
+            .map(|out_dir| relative_to(Path::new(&entry.src), out_dir))
+            .unwrap_or_else(|| PathBuf::from(&entry.src))
+    };
     let outputs = match transpile_to(
         allocator,
         transform_options,
@@ -337,7 +345,8 @@ fn transpile_entry(
         options,
         entry.js_out.is_some(),
         entry.dts_out.is_some(),
-        map_source.as_deref().unwrap_or(Path::new(&entry.src)),
+        &map_source(&entry.js_out),
+        &map_source(&entry.dts_out),
     ) {
         Ok(outputs) => outputs,
         Err(errors) => return errors,
@@ -350,7 +359,7 @@ fn transpile_entry(
         }
     }
     if let (Some(dts_out), Some(code)) = (&entry.dts_out, outputs.dts_code) {
-        if let Err(e) = write_output(dts_out, &code, None) {
+        if let Err(e) = write_output(dts_out, &code, outputs.dts_map.as_deref()) {
             errors.push(format!("error: cannot write {dts_out}: {e}"));
         }
     }
@@ -401,6 +410,7 @@ struct Outputs {
     js_code: Option<String>,
     js_map: Option<String>,
     dts_code: Option<String>,
+    dts_map: Option<String>,
 }
 
 fn build_transform_options(options: &Options) -> TransformOptions {
@@ -556,8 +566,8 @@ fn render_errors(
 }
 
 // Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
-// first, before the transformer mutates the program. `map_source` is the path recorded in the
-// source map's `sources`.
+// first, before the transformer mutates the program. `js_map_source` and `dts_map_source` are the
+// paths recorded in the respective source maps' `sources`.
 fn transpile_to(
     allocator: &mut Allocator,
     transform_options: &TransformOptions,
@@ -566,7 +576,8 @@ fn transpile_to(
     options: &Options,
     emit_js: bool,
     emit_dts: bool,
-    map_source: &Path,
+    js_map_source: &Path,
+    dts_map_source: &Path,
 ) -> Result<Outputs, Vec<String>> {
     // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
     let source_type = SourceType::from_path(filename)
@@ -596,7 +607,16 @@ fn transpile_to(
             return Err(render_errors(filename, source_text, decl_ret.diagnostics));
         }
 
-        outputs.dts_code = Some(Codegen::new().build(&decl_ret.program).code);
+        let mut codegen = Codegen::new();
+        if options.declaration_maps {
+            codegen = codegen.with_options(CodegenOptions {
+                source_map_path: Some(dts_map_source.to_path_buf()),
+                ..Default::default()
+            });
+        }
+        let codegen_ret = codegen.build(&decl_ret.program);
+        outputs.dts_code = Some(codegen_ret.code);
+        outputs.dts_map = codegen_ret.map.map(|m| m.to_json_string());
     }
 
     if emit_js {
@@ -635,7 +655,7 @@ fn transpile_to(
         let mut codegen = Codegen::new();
         if options.source_maps {
             codegen = codegen.with_options(CodegenOptions {
-                source_map_path: Some(map_source.to_path_buf()),
+                source_map_path: Some(js_map_source.to_path_buf()),
                 ..Default::default()
             });
         }
@@ -688,6 +708,7 @@ mod tests {
             options,
             emit_js,
             emit_dts,
+            Path::new(filename),
             Path::new(filename),
         )
     }
@@ -1200,6 +1221,28 @@ mod tests {
     }
 
     #[test]
+    fn declaration_maps_emitted_when_enabled() {
+        let options = Options { declaration_maps: true, ..default_options() };
+        let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
+        assert!(outputs.js_map.is_none());
+        let map = outputs.dts_map.unwrap();
+        assert!(map.contains("\"a.ts\""), "map: {map}");
+        assert!(!map.contains("\"mappings\":\"\""), "map: {map}");
+    }
+
+    #[test]
+    fn declaration_maps_not_emitted_by_default() {
+        let outputs = transpile("a.ts", "export const x: number = 1;\n", &default_options()).unwrap();
+        assert!(outputs.dts_map.is_none());
+    }
+
+    #[test]
+    fn run_rejects_declaration_maps_without_emit_dts() {
+        let err = run(args(&["--emit-js", "--declaration-maps"])).unwrap_err();
+        assert_eq!(err, vec!["error: --declaration-maps requires --emit-dts".to_string()]);
+    }
+
+    #[test]
     fn transpile_plain_js() {
         let result = transpile("a.js", "export const x = 1;\n", &js_options()).unwrap();
         let js = result.js_code.unwrap();
@@ -1706,6 +1749,32 @@ export class C {
         assert!(js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"), "js: {js}");
         // The source is recorded relative to the map's directory.
         let map = read(&dir.join("out/a.js.map"));
+        assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
+    }
+
+    #[test]
+    fn run_writes_declaration_map_relative_to_declaration_dir() {
+        let dir = test_dir("run_declaration_maps");
+        let src = dir.join("a.ts");
+        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        fs::create_dir_all(dir.join("types")).unwrap();
+        let js_out = dir.join("out/a.js");
+        let dts_out = dir.join("types/a.d.ts");
+        run(args(&[
+            "--emit-js",
+            "--emit-dts",
+            "--declaration-maps",
+            src.to_str().unwrap(),
+            js_out.to_str().unwrap(),
+            dts_out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        // Only the declaration gets a map: --source-maps was not given.
+        assert!(!dir.join("out/a.js.map").exists());
+        assert!(!read(&js_out).contains("sourceMappingURL"));
+        let dts = read(&dts_out);
+        assert!(dts.ends_with("//# sourceMappingURL=a.d.ts.map"), "dts: {dts}");
+        let map = read(&dir.join("types/a.d.ts.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
     }
 

@@ -48,6 +48,10 @@ struct Options {
     // Module the automatic JSX runtime is imported from (oxc's import_source), tsc's
     // jsxImportSource. Defaults to "react".
     jsx_import_source: Option<String>,
+    // tsc's jsx=react-jsxdev: the automatic runtime's development build, importing jsxDEV from
+    // <import_source>/jsx-dev-runtime and passing source locations. Requires the automatic
+    // runtime.
+    jsx_development: bool,
     // Factory and fragment for the classic JSX runtime (oxc's pragma/pragma_frag), tsc's
     // jsxFactory/jsxFragmentFactory. Default to React.createElement and React.Fragment.
     jsx_pragma: Option<String>,
@@ -155,6 +159,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--jsx-import-source" => {
                 cli.options.jsx_import_source = Some(flag_value(&mut args, &arg, "a value")?);
             }
+            "--jsx-development" => cli.options.jsx_development = true,
             "--jsx-pragma" => {
                 cli.options.jsx_pragma = Some(flag_value(&mut args, &arg, "a value")?);
             }
@@ -210,6 +215,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
         return Err(vec![
             "error: --jsx-import-source requires --jsx automatic".to_string(),
         ]);
+    }
+
+    if cli.options.jsx_development && cli.options.jsx != JsxRuntime::Automatic {
+        return Err(vec!["error: --jsx-development requires --jsx automatic".to_string()]);
     }
 
     if (cli.options.jsx_pragma.is_some() || cli.options.jsx_pragma_frag.is_some())
@@ -454,6 +463,7 @@ fn build_transform_options(options: &Options) -> TransformOptions {
         },
         jsx: JsxOptions {
             runtime: options.jsx,
+            development: options.jsx_development,
             import_source: options.jsx_import_source.clone(),
             pragma: options.jsx_pragma.clone(),
             pragma_frag: options.jsx_pragma_frag.clone(),
@@ -1287,6 +1297,36 @@ mod tests {
         let js = result.js_code.unwrap();
         assert!(js.contains("\"preact/jsx-runtime\""), "js: {js}");
         assert!(!js.contains("\"react/jsx-runtime\""), "js: {js}");
+    }
+
+    // jsx=react-jsxdev: the development runtime takes jsxDEV from jsx-dev-runtime and records the
+    // element's source location.
+    #[test]
+    fn jsx_development_uses_dev_runtime() {
+        let options = Options { jsx_development: true, ..js_options() };
+        let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
+        assert!(js.contains("\"react/jsx-dev-runtime\""), "js: {js}");
+        assert!(js.contains("_jsxDEV(\"div\""), "js: {js}");
+        assert!(js.contains("var _jsxFileName = \"a.tsx\""), "js: {js}");
+        assert!(js.contains("fileName: _jsxFileName"), "js: {js}");
+        assert!(js.contains("lineNumber: 1"), "js: {js}");
+    }
+
+    #[test]
+    fn jsx_development_uses_import_source() {
+        let options = Options {
+            jsx_development: true,
+            jsx_import_source: Some("preact".to_string()),
+            ..js_options()
+        };
+        let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
+        assert!(js.contains("\"preact/jsx-dev-runtime\""), "js: {js}");
+    }
+
+    #[test]
+    fn run_rejects_jsx_development_with_classic() {
+        let err = run(args(&["--emit-js", "--jsx", "classic", "--jsx-development"])).unwrap_err();
+        assert_eq!(err, vec!["error: --jsx-development requires --jsx automatic".to_string()]);
     }
 
     // jsxFactory/jsxFragmentFactory: the classic runtime uses the given pragma, and the pragma's

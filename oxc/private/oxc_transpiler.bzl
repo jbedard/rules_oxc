@@ -196,6 +196,8 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
         root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
         source_root_dir = "/".join([part for part in [ctx.label.package, root_dir] if part])
         args.add("--source-root-dir", source_root_dir or ".")
+    if ctx.attr.remove_comments:
+        args.add("--remove-comments")
     args.add("--manifest")
     args.add(manifest)
 
@@ -487,6 +489,13 @@ _oxc_transpiler_rule = rule(
                   "the sourceRoot instead of the map's location. Requires " +
                   "source_maps, inline_source_maps or declaration_maps.",
         ),
+        "remove_comments": attr.bool(
+            default = False,
+            doc = "tsc's removeComments: drop comments from the JS and " +
+                  "declaration outputs, keeping legal comments (`/*!`, " +
+                  "@license, @preserve) and tooling annotations such as " +
+                  "`/* @__PURE__ */`.",
+        ),
         "declaration_maps": attr.bool(
             default = False,
             doc = "tsc's declarationMap: emit a .d.ts.map beside each " +
@@ -589,6 +598,7 @@ def oxc_transpiler(
         declaration_maps = False,
         inline_source_maps = False,
         source_root = "",
+        remove_comments = False,
         **kwargs):
     """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
 
@@ -627,6 +637,7 @@ def oxc_transpiler(
         declaration_maps: tsc's declarationMap; emit a .d.ts.map beside each declaration.
         inline_source_maps: tsc's inlineSourceMap; embed the JS source maps as data URLs.
         source_root: tsc's sourceRoot; the sourceRoot recorded in every source map.
+        remove_comments: tsc's removeComments; drop comments from the JS and declaration outputs.
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)
@@ -662,5 +673,6 @@ def oxc_transpiler(
         declaration_maps = declaration_maps or False,
         inline_source_maps = inline_source_maps or False,
         source_root = source_root or "",
+        remove_comments = remove_comments or False,
         **kwargs
     )

@@ -876,6 +876,44 @@ diff_test(
     file2 = "importselided/imports.d.ts",
 )
 
+# remove_comments drops comments from the JS and declaration outputs, keeping
+# legal comments and the JSX transform's pure annotations; by default they are
+# all kept.
+[
+    (
+        oxc_transpiler(
+            name = "transpile_comments_" + name,
+            srcs = [
+                "src/commented.ts",
+                "src/component.tsx",
+            ],
+            emit_dts = True,
+            out_dir = "comments_" + name,
+            remove_comments = remove,
+            root_dir = "src",
+        ),
+        diff_test(
+            name = "comments_" + name + "_test",
+            file1 = "comments_" + name + "/commented.js",
+            file2 = "snapshots/commented_" + name + ".js",
+        ),
+        diff_test(
+            name = "comments_" + name + "_dts_test",
+            file1 = "comments_" + name + "/commented.d.ts",
+            file2 = "snapshots/commented_" + name + ".d.ts",
+        ),
+        diff_test(
+            name = "comments_" + name + "_jsx_test",
+            file1 = "comments_" + name + "/component.js",
+            file2 = "snapshots/component.js",
+        ),
+    )
+    for name, remove in [
+        ("kept", False),
+        ("removed", True),
+    ]
+]
+
 # strip_internal omits `/** @internal */` declarations from the .d.ts outputs,
 # like tsc's stripInternal; the JS output keeps them.
 oxc_transpiler(

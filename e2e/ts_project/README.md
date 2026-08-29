@@ -37,6 +37,8 @@ and `declaration_transpiler` attributes, one configuration per subdirectory:
   shared transpile target.
 - `inline_source_map` - tsconfig `inlineSourceMap` and `sourceRoot` mirrored
   by `inline_source_maps` and `source_root`.
+- `remove_comments` - tsconfig `removeComments` mirrored by `remove_comments`
+  on the shared transpile target.
 
 It lives as a separate e2e workspace because `ts_project` requires the
 `@npm_typescript` repository and node toolchain setup that the aspect_rules_oxc

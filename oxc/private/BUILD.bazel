@@ -41,10 +41,15 @@ config_setting(
 # Used with cfg = "exec", so the select() resolves against the exec platform.
 native_binary(
     name = "transpiler",
-    src = select({
-        ":darwin_arm64": "@transpiler_aarch64_apple_darwin//file",
-        ":linux_arm64": "@transpiler_aarch64_unknown_linux_gnu//file",
-        ":linux_x86_64": "@transpiler_x86_64_unknown_linux_gnu//file",
-    }),
+    src = select(
+        {
+            ":darwin_arm64": "@transpiler_aarch64_apple_darwin//file",
+            ":linux_arm64": "@transpiler_aarch64_unknown_linux_gnu//file",
+            ":linux_x86_64": "@transpiler_x86_64_unknown_linux_gnu//file",
+        },
+        no_match_error = "rules_oxc has no prebuilt transpiler for this exec platform. " +
+                         "Supported platforms: linux x86_64/arm64, macOS arm64. " +
+                         "Intel macOS and Windows are not supported.",
+    ),
     out = "transpiler_bin",
 )

@@ -59,6 +59,17 @@ The action reserves CPUs from Bazel's local scheduler via the `cpus` attribute.
 By default it scales logarithmically with the number of `srcs` (2 threads at 3
 files, 3 at 10, 4 at 100, capped at 4); set `cpus` explicitly to override.
 
+## Supported platforms
+
+Transpile actions run a prebuilt binary, so the *execution* platform (the
+machine running Bazel actions, whether the local host or remote executors)
+must be one of:
+
+- Linux x86_64 or arm64
+- macOS arm64
+
+Intel macOS and Windows are not supported.
+
 ## Limitations
 
 ### No typechecking

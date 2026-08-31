@@ -376,8 +376,8 @@ _oxc_transpiler_rule = rule(
         "root_dir": attr.string(),
         "out_dir": attr.string(),
         "declaration_dir": attr.string(
-            doc = "Directory for the .d.ts outputs, like tsc's declarationDir. " +
-                  "Defaults to out_dir.",
+            doc = "Directory for the .d.ts outputs, relative to the package. " +
+                  "Defaults to out_dir. Equivalent to tsc's declarationDir.",
         ),
         "emit_js": attr.bool(
             default = True,
@@ -389,10 +389,10 @@ _oxc_transpiler_rule = rule(
         ),
         "emit_json": attr.bool(
             default = False,
-            doc = "Copy .json srcs into the output layout, like tsc's emit " +
-                  "under resolveJsonModule; set this when the tsconfig sets " +
-                  "resolveJsonModule. Without it json srcs produce no " +
-                  "outputs, matching tsc.",
+            doc = "Copy .json srcs into the output layout unchanged; without " +
+                  "it json srcs produce no outputs. Matches tsc's emit, which " +
+                  "copies json only under resolveJsonModule — set this when " +
+                  "the tsconfig sets that option.",
         ),
         "source_maps": attr.bool(
             default = False,
@@ -400,12 +400,13 @@ _oxc_transpiler_rule = rule(
         ),
         "target": attr.string(
             doc = "Downlevel the JS outputs to an ECMAScript target (e.g. " +
-                  "\"es2017\"), like tsc's target. Defaults to the latest ES " +
-                  "version: syntax is left as written. es5 is not allowed: oxc " +
-                  "cannot fully downlevel ES2015 syntax. Transforms that need a " +
-                  "runtime helper (e.g. async functions below es2017) import it " +
-                  "from @oxc-project/runtime, which must then be added as a " +
-                  "runtime dependency. Declaration outputs are unaffected.",
+                  "\"es2017\"). Defaults to the latest ES version: syntax is " +
+                  "left as written. es5 is not allowed: oxc cannot fully " +
+                  "downlevel ES2015 syntax. Transforms that need a runtime " +
+                  "helper (e.g. async functions below es2017) import it from " +
+                  "@oxc-project/runtime, which must then be added as a runtime " +
+                  "dependency. Declaration outputs are unaffected. Equivalent " +
+                  "to tsc's target.",
             values = [
                 "",
                 "es6",
@@ -429,86 +430,88 @@ _oxc_transpiler_rule = rule(
                   "\"preserve\" (default) keeps the input module syntax. " +
                   "\"esm\" keeps ESM syntax and makes TypeScript's " +
                   "CommonJS-specific syntax (`export =`, `import x = " +
-                  "require(...)`) an error; tsc spells this mode " +
-                  "es2015/esnext, so map your tsconfig module manually. " +
-                  "\"commonjs\" mirrors tsc's module=commonjs for that " +
+                  "require(...)`) an error. \"commonjs\" transforms that " +
                   "CommonJS-specific syntax: `export =` becomes " +
                   "`module.exports =`, `import x = require(...)` becomes a " +
-                  "require call, and a \"use strict\" directive is added. oxc " +
+                  "require call, and a \"use strict\" directive is added; oxc " +
                   "has no ESM-to-CommonJS transform, so ESM import/export " +
-                  "syntax in the sources is an error with \"commonjs\".",
+                  "syntax in the sources is an error with \"commonjs\". " +
+                  "Coming from tsc, map the tsconfig module manually: " +
+                  "es2015/esnext is \"esm\", commonjs is \"commonjs\".",
             values = ["", "preserve", "esm", "commonjs"],
         ),
         "jsx": attr.string(
             doc = "JSX runtime, using oxc's values. \"automatic\" (default) is " +
-                  "the automatic jsx-runtime transform, tsc's jsx=react-jsx. " +
-                  "\"classic\" compiles JSX to React.createElement calls, tsc's " +
-                  "jsx=react; providing React is the caller's concern. Map " +
-                  "tsc's jsx value spellings to oxc's manually.",
+                  "the automatic jsx-runtime transform. \"classic\" compiles " +
+                  "JSX to React.createElement calls; providing React is the " +
+                  "caller's concern. Coming from tsc, map the jsx spellings " +
+                  "manually: react-jsx is \"automatic\", react is \"classic\".",
             values = ["", "automatic", "classic"],
         ),
         "jsx_import_source": attr.string(
-            doc = "Module the automatic JSX runtime is imported from, tsc's " +
-                  "jsxImportSource; \"react\" by default. Only applies to " +
-                  "jsx = \"automatic\".",
+            doc = "Module the automatic JSX runtime is imported from; " +
+                  "\"react\" by default. Only applies to jsx = \"automatic\". " +
+                  "Equivalent to tsc's jsxImportSource.",
         ),
         "jsx_factory": attr.string(
-            doc = "Function the classic JSX runtime compiles elements to, " +
-                  "tsc's jsxFactory; React.createElement by default. Only " +
-                  "applies to jsx = \"classic\".",
+            doc = "Function the classic JSX runtime compiles elements to; " +
+                  "React.createElement by default. Only applies to " +
+                  "jsx = \"classic\". Equivalent to tsc's jsxFactory.",
         ),
         "jsx_fragment_factory": attr.string(
-            doc = "Expression the classic JSX runtime compiles fragments to, " +
-                  "tsc's jsxFragmentFactory; React.Fragment by default. Only " +
-                  "applies to jsx = \"classic\".",
+            doc = "Expression the classic JSX runtime compiles fragments to; " +
+                  "React.Fragment by default. Only applies to " +
+                  "jsx = \"classic\". Equivalent to tsc's jsxFragmentFactory.",
         ),
         "experimental_decorators": attr.bool(
             default = False,
-            doc = "tsc's experimentalDecorators: compile decorators with the " +
-                  "legacy (pre-TC39) transform, calling the decorate helpers " +
-                  "imported from helpers_module. Without it decorators are " +
-                  "emitted as written, since oxc has no transform for the " +
-                  "standard proposal.",
+            doc = "Compile decorators with the legacy (pre-TC39) transform, " +
+                  "calling the decorate helpers imported from helpers_module. " +
+                  "Without it decorators are emitted as written, since oxc has " +
+                  "no transform for the standard proposal. Equivalent to " +
+                  "tsc's experimentalDecorators.",
         ),
         "emit_decorator_metadata": attr.bool(
             default = False,
-            doc = "tsc's emitDecoratorMetadata: record design:type, " +
-                  "design:paramtypes and design:returntype metadata for " +
-                  "decorated members through Reflect.metadata, so a " +
-                  "reflect-metadata polyfill must be loaded at runtime. " +
-                  "Requires experimental_decorators.",
+            doc = "Record design:type, design:paramtypes and design:returntype " +
+                  "metadata for decorated members through Reflect.metadata, so " +
+                  "a reflect-metadata polyfill must be loaded at runtime. " +
+                  "Requires experimental_decorators. Equivalent to tsc's " +
+                  "emitDecoratorMetadata.",
         ),
         "strict_null_checks": attr.bool(
             default = True,
-            doc = "tsc's strictNullChecks, which only affects decorator " +
-                  "metadata: when False, `T | null` records T's constructor " +
-                  "instead of Object.",
+            doc = "Affects only decorator metadata: when False, `T | null` " +
+                  "records T's constructor instead of Object. Set to match " +
+                  "the tsconfig's strictNullChecks.",
         ),
         "inline_source_maps": attr.bool(
             default = False,
-            doc = "tsc's inlineSourceMap: embed each JS output's source map " +
-                  "as a data URL in its sourceMappingURL comment instead of " +
-                  "writing a .js.map. Exclusive with source_maps.",
+            doc = "Embed each JS output's source map as a data URL in its " +
+                  "sourceMappingURL comment instead of writing a .js.map. " +
+                  "Exclusive with source_maps. Equivalent to tsc's " +
+                  "inlineSourceMap.",
         ),
         "source_root": attr.string(
-            doc = "tsc's sourceRoot: the sourceRoot recorded in every JS and " +
-                  "declaration source map. The map sources are then recorded " +
-                  "relative to root_dir, since consumers resolve them against " +
-                  "the sourceRoot instead of the map's location. Requires " +
-                  "source_maps, inline_source_maps or declaration_maps.",
+            doc = "The sourceRoot recorded in every JS and declaration source " +
+                  "map. The map sources are then recorded relative to " +
+                  "root_dir, since consumers resolve them against the " +
+                  "sourceRoot instead of the map's location. Requires " +
+                  "source_maps, inline_source_maps or declaration_maps. " +
+                  "Equivalent to tsc's sourceRoot.",
         ),
         "remove_comments": attr.bool(
             default = False,
-            doc = "tsc's removeComments: drop comments from the JS and " +
-                  "declaration outputs, keeping legal comments (`/*!`, " +
-                  "@license, @preserve) and tooling annotations such as " +
-                  "`/* @__PURE__ */`.",
+            doc = "Drop comments from the JS and declaration outputs, keeping " +
+                  "legal comments (`/*!`, @license, @preserve) and tooling " +
+                  "annotations such as `/* @__PURE__ */`. Equivalent to tsc's " +
+                  "removeComments.",
         ),
         "declaration_maps": attr.bool(
             default = False,
-            doc = "tsc's declarationMap: emit a .d.ts.map beside each " +
-                  "declaration output, exposed with the declarations as " +
-                  "types. Requires emit_dts.",
+            doc = "Emit a .d.ts.map beside each declaration output, exposed " +
+                  "with the declarations as types. Requires emit_dts. " +
+                  "Equivalent to tsc's declarationMap.",
         ),
         "rewrite_extensions": attr.bool(
             default = False,
@@ -521,37 +524,36 @@ _oxc_transpiler_rule = rule(
                   "are left untouched.",
         ),
         "use_define_for_class_fields": attr.string(
-            doc = "tsc's useDefineForClassFields. \"true\" keeps class fields " +
-                  "as field definitions, so a field without an initializer is " +
+            doc = "Class-field emit mode. \"true\" keeps class fields as " +
+                  "field definitions, so a field without an initializer is " +
                   "defined as undefined. \"false\" removes fields without an " +
                   "initializer and assigns the others in the constructor. " +
-                  "Unset defaults like tsc: \"true\" for target es2022 and " +
-                  "above (including the default, esnext), \"false\" below. " +
-                  "Declaration outputs are unaffected.",
+                  "Unset defaults like tsc's useDefineForClassFields: \"true\" " +
+                  "for target es2022 and above (including the default, " +
+                  "esnext), \"false\" below. Declaration outputs are " +
+                  "unaffected.",
             values = ["", "true", "false"],
         ),
         "strip_internal": attr.bool(
             default = False,
-            doc = "tsc's stripInternal: omit declarations documented with " +
-                  "`/** @internal */` from the .d.ts outputs. JS outputs are " +
-                  "unaffected.",
+            doc = "Omit declarations documented with `/** @internal */` from " +
+                  "the .d.ts outputs. JS outputs are unaffected. Equivalent " +
+                  "to tsc's stripInternal.",
         ),
         "verbatim_module_syntax": attr.bool(
             default = False,
-            doc = "tsc's verbatimModuleSyntax: only imports and exports " +
-                  "marked `type` are removed, so an import whose bindings " +
-                  "are unused after type stripping is kept for its side " +
-                  "effects. By default any such import is elided, like tsc " +
-                  "without the option.",
+            doc = "Remove only imports and exports marked `type`, so an " +
+                  "import whose bindings are unused after type stripping is " +
+                  "kept for its side effects. By default any such import is " +
+                  "elided. Equivalent to tsc's verbatimModuleSyntax.",
         ),
         "helpers_module": attr.string(
             doc = "Module to import runtime helpers from, defaulting to " +
                   "@oxc-project/runtime. Transforms that need a helper always " +
-                  "import it, like tsc's importHelpers; oxc has no inline " +
-                  "helper mode, so tsc's default importHelpers=false behavior " +
-                  "cannot be reproduced. The helpers module must be a runtime " +
-                  "dependency whenever a transform emits helper imports (none " +
-                  "do in the default configuration).",
+                  "import it: oxc has no inline helper mode, so behavior is " +
+                  "always like tsc's importHelpers=true. The helpers module " +
+                  "must be a runtime dependency whenever a transform emits " +
+                  "helper imports (none do in the default configuration).",
         ),
         "_tool": attr.label(
             executable = True,
@@ -612,7 +614,14 @@ def oxc_transpiler(
         source_root = "",
         remove_comments = False,
         **kwargs):
-    """Macro wrapping _oxc_transpiler_rule that pre-declares output files at load time.
+    """Transpile TypeScript and JavaScript sources with OXC.
+
+    Emits JavaScript and/or isolated .d.ts declarations without typechecking.
+    Each source file is transformed independently into its own outputs; nothing
+    is bundled. Provides JsInfo like ts_project, so targets can
+    consume the outputs interchangeably. Output files are pre-declared at load
+    time, letting downstream targets reference paths such as "dist/foo.js"
+    directly.
 
     Args:
         name: target name.
@@ -629,27 +638,29 @@ def oxc_transpiler(
         jsx: JSX runtime, "automatic" or "classic".
         rewrite_extensions: rewrite .ts-style import extensions to their JS extension.
         helpers_module: module to import runtime helpers from.
-        use_define_for_class_fields: tsc's useDefineForClassFields. Defaults like tsc to
-            True for target es2022 and above (including the default, esnext) and False below.
-            A select() must use the strings "true" and "false".
-        verbatim_module_syntax: tsc's verbatimModuleSyntax; keep imports that are unused
-            after type stripping instead of eliding them.
-        strip_internal: tsc's stripInternal; omit `/** @internal */` declarations from the
-            .d.ts outputs.
-        jsx_import_source: module the automatic JSX runtime is imported from, tsc's
-            jsxImportSource.
-        jsx_factory: function the classic runtime compiles elements to, tsc's jsxFactory.
-        jsx_fragment_factory: expression the classic runtime compiles fragments to, tsc's
-            jsxFragmentFactory.
-        experimental_decorators: tsc's experimentalDecorators; compile decorators with the
-            legacy transform.
-        emit_decorator_metadata: tsc's emitDecoratorMetadata; record design-time type metadata
-            for decorated members.
-        strict_null_checks: tsc's strictNullChecks, affecting only decorator metadata.
-        declaration_maps: tsc's declarationMap; emit a .d.ts.map beside each declaration.
-        inline_source_maps: tsc's inlineSourceMap; embed the JS source maps as data URLs.
-        source_root: tsc's sourceRoot; the sourceRoot recorded in every source map.
-        remove_comments: tsc's removeComments; drop comments from the JS and declaration outputs.
+        use_define_for_class_fields: class-field emit mode (tsc's useDefineForClassFields).
+            Defaults like tsc to True for target es2022 and above (including the default,
+            esnext) and False below. A select() must use the strings "true" and "false".
+        verbatim_module_syntax: keep imports that are unused after type stripping instead
+            of eliding them (tsc's verbatimModuleSyntax).
+        strip_internal: omit `/** @internal */` declarations from the .d.ts outputs
+            (tsc's stripInternal).
+        jsx_import_source: module the automatic JSX runtime is imported from (tsc's
+            jsxImportSource).
+        jsx_factory: function the classic runtime compiles elements to (tsc's jsxFactory).
+        jsx_fragment_factory: expression the classic runtime compiles fragments to (tsc's
+            jsxFragmentFactory).
+        experimental_decorators: compile decorators with the legacy transform (tsc's
+            experimentalDecorators).
+        emit_decorator_metadata: record design-time type metadata for decorated members
+            (tsc's emitDecoratorMetadata).
+        strict_null_checks: affects only decorator metadata; match the tsconfig's
+            strictNullChecks.
+        declaration_maps: emit a .d.ts.map beside each declaration (tsc's declarationMap).
+        inline_source_maps: embed the JS source maps as data URLs (tsc's inlineSourceMap).
+        source_root: the sourceRoot recorded in every source map (tsc's sourceRoot).
+        remove_comments: drop comments from the JS and declaration outputs (tsc's
+            removeComments).
         **kwargs: common attributes forwarded to the rule.
     """
     out_dir = _clean_dir(out_dir)

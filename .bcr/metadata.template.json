@@ -6,6 +6,12 @@
       "email": "jason@aspect.build",
       "github": "jbedard",
       "github_user_id": 89246
+    },
+    {
+      "name": "Greg Magolan",
+      "email": "greg@aspect.build",
+      "github": "gregmagolan",
+      "github_user_id": 520826
     }
   ],
   "repository": ["github:aspect-build/rules_oxc"],

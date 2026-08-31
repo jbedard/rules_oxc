@@ -28,63 +28,25 @@ struct Options {
     emit_js: bool,
     emit_dts: bool,
     source_maps: bool,
-    // tsc's inlineSourceMap: the JS source map embedded as a data URL in the sourceMappingURL
-    // comment instead of written to a .js.map file. Exclusive with source_maps.
     inline_source_maps: bool,
-    // tsc's declarationMap: a .d.ts.map beside each declaration output. Requires emit_dts.
     declaration_maps: bool,
-    // tsc's sourceRoot: the `sourceRoot` recorded in every source map.
     source_root: Option<String>,
-    // Directory the map `sources` are recorded relative to when source_root is set, since
-    // consumers then resolve them against source_root instead of the map's location. tsc uses
-    // its rootDir here; the Bazel rule passes the root_dir. Without it sources stay relative to
-    // the map, which is only correct when the map sits in that root.
+    // Used as the base for map sources when source_root changes how consumers resolve them.
     source_root_dir: Option<PathBuf>,
-    // tsc's removeComments: drop comments from the JS and declaration outputs, keeping legal
-    // comments (`/*!`, @license, @preserve) like tsc and the annotations tooling relies on
-    // (`/* @__PURE__ */` and friends).
     remove_comments: bool,
-    // The "automatic" or "classic" runtime of the JSX transform (tsc's jsx=react-jsx and
-    // jsx=react). No jsx=preserve equivalent: preserved JSX cannot run under Node, and a
-    // JSX-aware bundler consumes the .tsx sources directly.
     jsx: JsxRuntime,
     rewrite_extensions: bool,
-    // Downlevel transforms for an ES target (e.g. "es2017"), like tsc's `target`; None keeps the latest syntax.
     env: Option<EnvOptions>,
-    // Module to import runtime helpers from, defaulting to @oxc-project/runtime. Helpers are
-    // always imported (like tsc's importHelpers): oxc has no inline helper mode.
     helpers_module: Option<String>,
-    // Module format of the output, using oxc's Module values. Preserve keeps the input syntax.
-    // Esm makes TypeScript's CommonJS-specific syntax (`export =`, `import x = require(...)`) an
-    // error. CommonJS rewrites that syntax and adds "use strict"; oxc has no ESM-to-CJS
-    // transform, so remaining ESM syntax is an error.
     module: Module,
-    // Module the automatic JSX runtime is imported from (oxc's import_source), tsc's
-    // jsxImportSource. Defaults to "react".
     jsx_import_source: Option<String>,
-    // Factory and fragment for the classic JSX runtime (oxc's pragma/pragma_frag), tsc's
-    // jsxFactory/jsxFragmentFactory. Default to React.createElement and React.Fragment.
     jsx_pragma: Option<String>,
     jsx_pragma_frag: Option<String>,
-    // tsc's useDefineForClassFields. false (the default, matching swc) maps to oxc's
-    // set_public_class_fields assumption plus remove_class_fields_without_initializer; true keeps
-    // define semantics, tsc's own default for target >= es2022.
     use_define_for_class_fields: bool,
-    // tsc's stripInternal: omit declarations marked /** @internal */ from the .d.ts outputs.
     strip_internal: bool,
-    // tsc's verbatimModuleSyntax: only imports/exports marked `type` are removed, instead of
-    // eliding any import that is unused after type stripping.
     only_remove_type_imports: bool,
-    // tsc's experimentalDecorators: the legacy (pre-TC39) decorator transform, emitting
-    // _decorate/_decorateParam helper calls. Without it decorators are left as written, since
-    // oxc has no transform for the standard proposal. Helpers come from the helpers module.
     experimental_decorators: bool,
-    // tsc's emitDecoratorMetadata: design:type/paramtypes/returntype metadata via
-    // _decorateMetadata, which calls Reflect.metadata at runtime (a reflect-metadata polyfill
-    // is the caller's concern). Requires experimental_decorators.
     emit_decorator_metadata: bool,
-    // tsc's strictNullChecks=false, which only affects decorator metadata: `T | null` records
-    // T's constructor rather than Object.
     no_strict_null_checks: bool,
 }
 
@@ -103,7 +65,6 @@ fn main() {
     }
 }
 
-// The value following `flag`, or an error naming the flag when missing.
 fn flag_value(
     args: &mut impl Iterator<Item = String>,
     flag: &str,
@@ -283,10 +244,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
     Ok(cli)
 }
 
-// Each manifest entry is the source path followed by the JS output path (when --emit-js) and
-// the declaration output path (when --emit-dts). An empty output path skips that output for
-// the entry (e.g. no declarations for plain JS sources). Entries come from the manifest file
-// when given, otherwise from the positional arguments.
+// Manifest entries contain a source followed by the enabled output paths. Empty paths skip output.
 fn read_entries(
     options: &Options,
     manifest_path: Option<String>,
@@ -321,10 +279,7 @@ fn read_entries(
     Ok(entries)
 }
 
-// Transpiles and writes every entry, with up to --cpus entries in flight at once. Failures do
-// not prevent other entries from being processed, so all errors are reported in one pass, in
-// manifest order. Outputs from entries that completed before a failure are intentionally
-// retained rather than buffering every generated file in memory.
+// Keep processing after failures and return errors in manifest order.
 fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Result<(), Vec<String>> {
     let transform_options = build_transform_options(options);
     let next = AtomicUsize::new(0);
@@ -395,8 +350,7 @@ impl Worker<'_> {
             Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
         };
 
-        // Source map consumers resolve `sources` against the map's own location — or, when
-        // sourceRoot is set, against that root, so sources are recorded relative to its directory.
+        // sourceRoot makes consumers resolve sources relative to a different base.
         let map_source = |out: &Option<String>| {
             if let Some(root_dir) = &self.options.source_root_dir {
                 return relative_to(Path::new(&entry.src), root_dir);
@@ -422,11 +376,13 @@ impl Worker<'_> {
 
         let mut errors = Vec::new();
         if let (Some(js_out), Some(code)) = (&entry.js_out, outputs.js_code) {
-            let map = if self.options.inline_source_maps {
-                outputs.js_map_data_url.map(SourceMapOutput::Inline)
-            } else {
-                outputs.js_map.map(SourceMapOutput::File)
-            };
+            let map = outputs.js_map.map(|map| {
+                if self.options.inline_source_maps {
+                    SourceMapOutput::Inline(map)
+                } else {
+                    SourceMapOutput::File(map)
+                }
+            });
             if let Err(e) = write_output(js_out, &code, map.as_ref()) {
                 errors.push(format!("error: cannot write {js_out}: {e}"));
             }
@@ -440,10 +396,7 @@ impl Worker<'_> {
         errors
     }
 
-    // Parses once and emits JS and/or declaration outputs from the same AST. Declarations are
-    // emitted first, before the transformer mutates the program. A source map is emitted only
-    // when its option is set; `js_map_source` and `dts_map_source` are the paths recorded in
-    // the respective source maps' `sources`.
+    // Emit declarations before the transformer mutates the shared AST.
     fn transpile(
         &mut self,
         filename: &str,
@@ -486,9 +439,7 @@ impl Worker<'_> {
         }
 
         if emit_js {
-            // oxc's own compiler configuration: the transformer needs pre-evaluated enum member
-            // values (string members are otherwise given reverse mappings), and roughly triples the
-            // scope and symbol counts.
+            // Pre-evaluation prevents reverse mappings for string enum members.
             let semantic_ret = SemanticBuilder::new_compiler()
                 .with_enum_eval(true)
                 .with_excess_capacity(2.0)
@@ -503,8 +454,7 @@ impl Worker<'_> {
             check(filename, source_text, diagnostics)?;
 
             if self.options.module.is_commonjs() {
-                // An empty `export {}` — hand-written, or appended by the transformer after erasing a
-                // file's only module syntax — is dropped rather than rejected, matching tsc.
+                // The transformer may leave `export {}` after erasing type-only module syntax.
                 parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
                 let diagnostics =
                     commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
@@ -520,13 +470,14 @@ impl Worker<'_> {
                 .build(&parser_ret.program);
 
             outputs.js_code = Some(codegen_ret.code);
-            // Only the emitted form is serialized: the data URL for inline maps, JSON otherwise.
             let map = with_source_root!(codegen_ret.map, self.options);
-            if self.options.inline_source_maps {
-                outputs.js_map_data_url = map.as_ref().map(|m| m.to_data_url());
-            } else {
-                outputs.js_map = map.map(|m| m.to_json_string());
-            }
+            outputs.js_map = map.map(|map| {
+                if self.options.inline_source_maps {
+                    map.to_data_url()
+                } else {
+                    map.to_json_string()
+                }
+            });
         }
 
         Ok(outputs)
@@ -534,9 +485,7 @@ impl Worker<'_> {
 }
 
 enum SourceMapOutput {
-    // JSON written to a sibling .map file, referenced by name.
     File(String),
-    // A data URL embedded in the sourceMappingURL comment itself.
     Inline(String),
 }
 
@@ -559,8 +508,7 @@ fn write_output(path: &str, code: &str, map: Option<&SourceMapOutput>) -> std::i
     Ok(())
 }
 
-// `target` expressed relative to `base_dir`, with both paths relative to the same root (or both
-// absolute), as Bazel passes exec-root-relative source and output paths.
+// Both paths are relative to the same root, or both are absolute.
 fn relative_to(target: &Path, base_dir: &Path) -> PathBuf {
     let mut target_parts = target
         .components()
@@ -583,9 +531,6 @@ fn relative_to(target: &Path, base_dir: &Path) -> PathBuf {
     relative
 }
 
-// Matches the Bazel rule's _is_declaration: all three declaration extensions, so a .d.mts/.d.cts
-// input passes through instead of hitting the transpile path (isolated declarations would error
-// on a declaration file).
 fn is_declaration_file(path: &str) -> bool {
     path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
@@ -594,7 +539,6 @@ fn is_declaration_file(path: &str) -> bool {
 struct Outputs {
     js_code: Option<String>,
     js_map: Option<String>,
-    js_map_data_url: Option<String>,
     dts_code: Option<String>,
     dts_map: Option<String>,
 }
@@ -613,10 +557,6 @@ fn codegen_options(options: &Options, source_map_path: Option<PathBuf>) -> Codeg
 
 fn build_transform_options(options: &Options) -> TransformOptions {
     TransformOptions {
-        // Without --use-define-for-class-fields, matches tsc's useDefineForClassFields=false:
-        // fields are assigned with `=` rather than Object.defineProperty, and fields without an
-        // initializer are removed rather than set to undefined. With the flag, define semantics
-        // are kept (tsc's own default for target >= es2022).
         assumptions: CompilerAssumptions {
             set_public_class_fields: !options.use_define_for_class_fields,
             ..Default::default()
@@ -624,8 +564,6 @@ fn build_transform_options(options: &Options) -> TransformOptions {
         typescript: {
             let mut typescript = TypeScriptOptions {
                 remove_class_fields_without_initializer: !options.use_define_for_class_fields,
-                // Like tsc's verbatimModuleSyntax: keep imports that are unused after type
-                // stripping.
                 only_remove_type_imports: options.only_remove_type_imports,
                 // Like tsc's rewriteRelativeImportExtensions, but Babel semantics: any
                 // slash-containing .ts/.tsx/.mts/.cts specifier is rewritten, and .tsx always
@@ -662,8 +600,6 @@ fn build_transform_options(options: &Options) -> TransformOptions {
             env.module = options.module;
             env
         },
-        // Helpers are imported like tsc's importHelpers (oxc's only implemented mode);
-        // --helpers-module redirects the imports away from the default @oxc-project/runtime.
         helper_loader: {
             let mut helper_loader = HelperLoaderOptions::default();
             if let Some(name) = &options.helpers_module {
@@ -702,19 +638,13 @@ impl<'a> Visit<'a> for TopLevelAwaitFinder {
         }
     }
 
-    // Await inside any function belongs to that function, not the module.
     fn visit_function(&mut self, _func: &Function<'a>, _flags: ScopeFlags) {}
 
     fn visit_arrow_function_expression(&mut self, _func: &ArrowFunctionExpression<'a>) {}
 }
 
-// An `export {}` with no specifiers: it only marks the file as a module and has no CommonJS
-// equivalent. (Exports with a declaration or a source are separate AST variants.)
 fn is_empty_export(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::ExportNamedDeclaration(decl) => decl.specifiers.is_empty(),
-        _ => false,
-    }
+    matches!(stmt, Statement::ExportNamedDeclaration(decl) if decl.specifiers.is_empty())
 }
 
 // The transformer rewrites `export =`/`import x = require(...)` and erases type-only imports,
@@ -744,7 +674,6 @@ fn commonjs_diagnostics(program: &Program, module_record: &ModuleRecord) -> Vec<
         .collect()
 }
 
-// Fails with the rendered diagnostics, if any.
 fn check(
     filename: &str,
     source_text: &str,
@@ -776,16 +705,12 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let dir = base.join(name);
-        // Outputs go under out/, created up front like Bazel does for declared outputs.
         fs::create_dir_all(dir.join("out")).unwrap();
         dir
     }
 
-    fn args(list: &[&str]) -> impl Iterator<Item = String> {
-        list.iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
+    fn args<'a>(list: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
+        list.iter().map(|s| s.to_string())
     }
 
     fn read(path: &Path) -> String {
@@ -851,12 +776,10 @@ mod tests {
         Options { module: Module::Esm, ..js_options() }
     }
 
-    // JS output of a successful transpile; panics with the rendered errors otherwise.
     fn transpile_js(filename: &str, source_text: &str, options: &Options) -> String {
         transpile(filename, source_text, options).unwrap().js_code.unwrap()
     }
 
-    // Rendered errors of a failed transpile, joined; panics if it succeeds.
     fn transpile_err(filename: &str, source_text: &str, options: &Options) -> String {
         transpile(filename, source_text, options).unwrap_err().concat()
     }
@@ -884,8 +807,6 @@ mod tests {
         assert!(!js.contains("??"), "js: {js}");
     }
 
-    // Downleveled async functions need the asyncToGenerator helper, imported from @oxc-project/runtime:
-    // that package must be a runtime dependency when targets below es2017 are used with async code.
     #[test]
     fn target_downlevels_async_with_runtime_helper() {
         let js = transpile_js(
@@ -918,7 +839,6 @@ mod tests {
     fn run_accepts_supported_targets() {
         for target in SUPPORTED_TARGETS {
             let err = run(args(&["--target", target])).unwrap_err();
-            // Parsing succeeds; the error is the unrelated missing-emit check.
             assert_eq!(
                 err,
                 vec!["error: at least one of --emit-js or --emit-dts is required".to_string()],
@@ -928,13 +848,25 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_target_value() {
-        let err = run(args(&["--emit-js", "--target"])).unwrap_err();
-        assert_eq!(err, vec!["error: --target requires a value".to_string()]);
+    fn run_requires_flag_values() {
+        for (flag, value) in [
+            ("--target", "a value"),
+            ("--helpers-module", "a value"),
+            ("--module", "a value"),
+            ("--source-root", "a value"),
+            ("--source-root-dir", "a directory path"),
+            ("--jsx", "a value"),
+            ("--jsx-import-source", "a value"),
+            ("--jsx-pragma", "a value"),
+            ("--jsx-pragma-frag", "a value"),
+            ("--cpus", "a positive integer"),
+            ("--manifest", "a file path"),
+        ] {
+            let err = run(args(&["--emit-js", flag])).unwrap_err();
+            assert_eq!(err, vec![format!("error: {flag} requires {value}")]);
+        }
     }
 
-    // Helpers only appear when a transform needs one, and none does in the default configuration;
-    // downlevel async to es2016 so the transform pulls in the asyncToGenerator helper.
     fn helpers_options(helpers_module: Option<&str>) -> Options {
         Options {
             helpers_module: helpers_module.map(str::to_string),
@@ -974,12 +906,6 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_helpers_module_value() {
-        let err = run(args(&["--emit-js", "--helpers-module"])).unwrap_err();
-        assert_eq!(err, vec!["error: --helpers-module requires a value".to_string()]);
-    }
-
-    #[test]
     fn esm_keeps_esm_syntax() {
         let js = transpile_js(
             "a.ts",
@@ -991,8 +917,6 @@ mod tests {
         assert!(!js.contains("use strict"), "js: {js}");
     }
 
-    // With module=esm, oxc reports TypeScript's CommonJS-specific syntax as errors (TS1203/TS1202)
-    // instead of rewriting it.
     #[test]
     fn esm_rejects_export_assignment() {
         let err = transpile_err("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
@@ -1042,7 +966,6 @@ mod tests {
         assert!(!js.contains("export {}"), "js: {js}");
     }
 
-    // `export {}` only marks a file as a module; CommonJS output drops it.
     #[test]
     fn commonjs_drops_empty_export() {
         let js = transpile_js(
@@ -1083,7 +1006,6 @@ mod tests {
         assert!(err.contains("cannot be emitted as CommonJS"), "{err}");
     }
 
-    // Uses a .ts source: the parser already rejects top-level await in .cts files.
     #[test]
     fn commonjs_rejects_top_level_await() {
         let err = transpile_single_err(
@@ -1106,7 +1028,6 @@ mod tests {
         assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
     }
 
-    // Await inside a function is not top-level and stays valid in CommonJS.
     #[test]
     fn commonjs_allows_await_inside_functions() {
         let js = transpile_js(
@@ -1118,7 +1039,6 @@ mod tests {
         assert!(js.contains("module.exports = g"));
     }
 
-    // `await using` at module scope is top-level await too.
     #[test]
     fn commonjs_rejects_top_level_await_using() {
         for init in ["r", "await r"] {
@@ -1154,19 +1074,11 @@ mod tests {
         assert!(err.contains("import.meta cannot be emitted as CommonJS"), "{err}");
     }
 
-    // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that in
-    // any module mode), ESM stays ESM, and no "use strict" is added.
     #[test]
     fn preserve_keeps_esm_and_omits_use_strict() {
         let js = transpile_js("a.cts", "export const x: number = 1;\n", &js_options());
         assert!(js.contains("export const x = 1"), "js: {js}");
         assert!(!js.contains("use strict"), "js: {js}");
-    }
-
-    #[test]
-    fn run_requires_module_value() {
-        let err = run(args(&["--emit-js", "--module"])).unwrap_err();
-        assert_eq!(err, vec!["error: --module requires a value".to_string()]);
     }
 
     #[test]
@@ -1216,7 +1128,6 @@ mod tests {
         assert!(!dts.contains("return"), "dts: {dts}");
     }
 
-    // tsc's stripInternal: /** @internal */ declarations are omitted from the dts output.
     const COMMENTED: &str = "\
 /*! legal */
 // note
@@ -1234,7 +1145,6 @@ export const x: number = 1;
         assert!(dts.contains("/** Doc for x. */"), "dts: {dts}");
     }
 
-    // tsc's removeComments strips everything but legal comments, from the declarations too.
     #[test]
     fn remove_comments_strips_all_but_legal_comments() {
         let options = Options { remove_comments: true, ..default_options() };
@@ -1247,7 +1157,6 @@ export const x: number = 1;
         assert!(!dts.contains("Doc for x"), "dts: {dts}");
     }
 
-    // Annotations are not comments to tooling: the JSX transform's pure markers survive.
     #[test]
     fn remove_comments_keeps_pure_annotations() {
         let options = Options { remove_comments: true, ..js_options() };
@@ -1292,7 +1201,6 @@ export const x: number = 1;
 
     #[test]
     fn transpile_reports_isolated_declaration_errors() {
-        // Inferred return type is not allowed under isolated declarations.
         transpile(
             "a.ts",
             "export function f() { return someValue(); }\nfunction someValue() { return 1; }\n",
@@ -1311,8 +1219,6 @@ export const x: number = 1;
         assert!(js.contains("assigned = 1"), "js: {js}");
     }
 
-    // With --use-define-for-class-fields, fields keep define semantics: uninitialized fields
-    // remain as field definitions instead of being removed.
     #[test]
     fn use_define_for_class_fields_keeps_field_definitions() {
         let options = Options { use_define_for_class_fields: true, ..js_options() };
@@ -1339,10 +1245,8 @@ export const x: number = 1;
     fn inline_source_maps_produce_data_url() {
         let options = Options { inline_source_maps: true, ..js_options() };
         let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
-        let url = outputs.js_map_data_url.unwrap();
+        let url = outputs.js_map.unwrap();
         assert!(url.starts_with("data:application/json;charset=utf-8;base64,"), "url: {url}");
-        // The JSON form is not serialized for inline maps.
-        assert!(outputs.js_map.is_none());
     }
 
     #[test]
@@ -1367,8 +1271,6 @@ export const x: number = 1;
         assert!(!map.contains("sourceRoot"), "map: {map}");
     }
 
-    // Sources are recorded relative to --source-root-dir, since consumers resolve them against
-    // the configured root rather than the map's location.
     #[test]
     fn run_source_root_dir_makes_sources_root_relative() {
         let dir = test_dir("run_source_root_dir");
@@ -1412,12 +1314,6 @@ export const x: number = 1;
     fn run_rejects_source_root_without_maps() {
         let err = run(args(&["--emit-js", "--source-root", "/src"])).unwrap_err();
         assert!(err[0].starts_with("error: --source-root requires"), "{err:?}");
-    }
-
-    #[test]
-    fn run_requires_source_root_value() {
-        let err = run(args(&["--emit-js", "--source-root"])).unwrap_err();
-        assert_eq!(err, vec!["error: --source-root requires a value".to_string()]);
     }
 
     #[test]
@@ -1475,7 +1371,6 @@ export const x: number = 1;
         assert!(!js.contains("<div"), "js: {js}");
     }
 
-    // jsxImportSource: the automatic runtime imports from the given module.
     #[test]
     fn jsx_import_source_changes_runtime_module() {
         let options = Options { jsx_import_source: Some("preact".to_string()), ..js_options() };
@@ -1487,7 +1382,7 @@ export const x: number = 1;
     // jsxFactory/jsxFragmentFactory: the classic runtime uses the given pragma, and the pragma's
     // import survives type stripping.
     #[test]
-    fn jsx_pragma_changes_classic_factory() {
+    fn jsx_pragma_changes_factory_and_preserves_pragma_import() {
         let options = Options {
             jsx: JsxRuntime::Classic,
             jsx_pragma: Some("h".to_string()),
@@ -1525,20 +1420,6 @@ export const x: number = 1;
             err,
             vec!["error: --jsx-pragma and --jsx-pragma-frag require --jsx classic".to_string()]
         );
-    }
-
-    #[test]
-    fn run_requires_jsx_option_values() {
-        for flag in ["--jsx-import-source", "--jsx-pragma", "--jsx-pragma-frag"] {
-            let err = run(args(&["--emit-js", flag])).unwrap_err();
-            assert_eq!(err, vec![format!("error: {flag} requires a value")]);
-        }
-    }
-
-    #[test]
-    fn run_requires_jsx_value() {
-        let err = run(args(&["--emit-js", "--jsx"])).unwrap_err();
-        assert_eq!(err, vec!["error: --jsx requires a value".to_string()]);
     }
 
     #[test]
@@ -1628,7 +1509,6 @@ export const x: number = 1;
         assert!(js.contains("\"./b.ts\""));
     }
 
-    // oxc rewrites any slash-containing specifier, bare package paths included, unlike tsc.
     #[test]
     fn transpile_rewrites_bare_specifier_with_slash() {
         let options = Options { rewrite_extensions: true, ..js_options() };
@@ -1653,8 +1533,6 @@ export class C {
         Options { experimental_decorators: true, ..js_options() }
     }
 
-    // Without --experimental-decorators oxc has no transform to apply: decorators are emitted
-    // as written, for a runtime or bundler that understands the standard proposal.
     #[test]
     fn decorators_kept_without_experimental_decorators() {
         let js = transpile_js("a.ts", DECORATED, &js_options());
@@ -1714,7 +1592,7 @@ export class C {
     }
 
     #[test]
-    fn transpile_module_variant_sources() {
+    fn transpile_supports_mts_and_cts_sources() {
         let result =
             transpile("a.mts", "export const x: number = 1;\n", &default_options()).unwrap();
         assert!(result.js_code.unwrap().contains("export const x = 1"));
@@ -1753,18 +1631,6 @@ export class C {
     }
 
     #[test]
-    fn run_requires_cpu_count_value() {
-        let err = run(args(&["--emit-js", "--cpus"])).unwrap_err();
-        assert_eq!(err, vec!["error: --cpus requires a positive integer".to_string()]);
-    }
-
-    #[test]
-    fn run_requires_manifest_path() {
-        let err = run(args(&["--emit-js", "--manifest"])).unwrap_err();
-        assert_eq!(err, vec!["error: --manifest requires a file path".to_string()]);
-    }
-
-    #[test]
     fn run_reports_unreadable_manifest() {
         let dir = test_dir("run_missing_manifest");
         let err = run_in(&dir, &["--emit-js", "--manifest"], ["missing.txt"]).unwrap_err();
@@ -1772,10 +1638,9 @@ export class C {
     }
 
     #[test]
-    fn run_rejects_misaligned_entries() {
+    fn run_rejects_entries_missing_enabled_output_paths() {
         let dir = test_dir("run_misaligned");
         write_file(&dir, "a.ts", "export const x = 1;\n");
-        // --emit-js and --emit-dts expect 3 lines per entry; give 2.
         let err = run_in(&dir, &["--emit-js", "--emit-dts"], ["a.ts", "a.js"]).unwrap_err();
         assert!(err[0].contains("expected entries of 3 lines"), "{err:?}");
     }
@@ -1805,7 +1670,7 @@ export class C {
     }
 
     #[test]
-    fn run_accepts_cpu_count() {
+    fn run_transpiles_multiple_entries_with_requested_cpu_count() {
         let dir = test_dir("run_parallel");
         write_file(&dir, "first.ts", "export const first: number = 1;\n");
         write_file(&dir, "second.ts", "export const second: number = 2;\n");
@@ -1842,7 +1707,6 @@ export class C {
         let dir = test_dir("run_empty_dts");
         let src = write_file(&dir, "a.js", "export const x = 1;\n");
         let js_out = dir.join("out/a.js");
-        // Plain JS entry: empty declaration output line means no dts emitted.
         write_file(
             &dir,
             "manifest.txt",
@@ -1874,18 +1738,16 @@ export class C {
     }
 
     #[test]
-    fn run_appends_source_mapping_url_and_writes_map() {
+    fn run_writes_external_source_map_with_relative_source_path() {
         let dir = test_dir("run_source_maps");
         write_file(&dir, "a.ts", "export const x: number = 1;\n");
         run_in(&dir, &["--emit-js", "--source-maps"], ["a.ts", "out/a.js"]).unwrap();
         let js = read(&dir.join("out/a.js"));
         assert!(js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"), "js: {js}");
-        // The source is recorded relative to the map's directory.
         let map = read(&dir.join("out/a.js.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
     }
 
-    // Inline maps embed the map in the JS itself: no .js.map file is written.
     #[test]
     fn run_embeds_inline_source_map() {
         let dir = test_dir("run_inline_source_maps");
@@ -1918,7 +1780,6 @@ export class C {
             ["a.ts", "out/a.js", "types/a.d.ts"],
         )
         .unwrap();
-        // Only the declaration gets a map: --source-maps was not given.
         assert!(!dir.join("out/a.js.map").exists());
         assert!(!read(&dir.join("out/a.js")).contains("sourceMappingURL"));
         let dts = read(&dir.join("types/a.d.ts"));
@@ -1956,7 +1817,6 @@ export class C {
             ["bad1.ts", "out/bad1.js", "bad2.ts", "out/bad2.js", "good.ts", "out/good.js"],
         )
         .unwrap_err();
-        // Both failing entries are reported, while successful entries are written immediately.
         assert!(err.len() >= 2, "errors: {err:?}");
         assert!(dir.join("out/good.js").exists());
     }
@@ -1979,18 +1839,15 @@ export class C {
         assert!(dir.join("out/good.d.ts").exists());
     }
 
-    // A write failure is reported as an error like any other, not a panic.
     #[test]
     fn run_reports_unwritable_output() {
         let dir = test_dir("run_unwritable_output");
         write_file(&dir, "a.ts", "export const x: number = 1;\n");
-        // A plain file where the output's parent directory should be.
         write_file(&dir, "blocker", "");
         let err = run_in(&dir, &["--emit-js"], ["a.ts", "blocker/a.js"]).unwrap_err();
         assert!(err[0].starts_with("error: cannot write"), "{err:?}");
     }
 
-    // Output parent directories are Bazel's job; a missing one is an error, not created.
     #[test]
     fn run_does_not_create_output_directories() {
         let dir = test_dir("run_missing_output_dir");
@@ -2000,7 +1857,6 @@ export class C {
         assert!(!dir.join("missing").exists());
     }
 
-    // An unreadable source is reported alongside other entries' errors instead of aborting the pass.
     #[test]
     fn run_aggregates_read_errors_across_entries() {
         let dir = test_dir("run_read_error_aggregation");

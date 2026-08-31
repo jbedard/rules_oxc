@@ -65,7 +65,7 @@ fn main() {
     }
 }
 
-fn flag_value(
+fn required_flag_value(
     args: &mut impl Iterator<Item = String>,
     flag: &str,
     what: &str,
@@ -75,8 +75,8 @@ fn flag_value(
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
     let Cli { options, cpus, manifest_path, positional } = parse_args(args)?;
-    let entries = read_entries(&options, manifest_path, positional)?;
-    transpile_entries(&options, cpus, &entries)
+    let entries = load_entries(&options, manifest_path, positional)?;
+    transpile_and_write_entries(&options, cpus, &entries)
 }
 
 const SUPPORTED_TARGETS: [&str; 14] = [
@@ -107,15 +107,19 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--inline-source-maps" => cli.options.inline_source_maps = true,
             "--declaration-maps" => cli.options.declaration_maps = true,
             "--source-root" => {
-                cli.options.source_root = Some(flag_value(&mut args, &arg, "a value")?);
+                cli.options.source_root = Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--source-root-dir" => {
                 cli.options.source_root_dir =
-                    Some(PathBuf::from(flag_value(&mut args, &arg, "a directory path")?));
+                    Some(PathBuf::from(required_flag_value(
+                        &mut args,
+                        &arg,
+                        "a directory path",
+                    )?));
             }
             "--remove-comments" => cli.options.remove_comments = true,
             "--cpus" => {
-                let value = flag_value(&mut args, &arg, "a positive integer")?;
+                let value = required_flag_value(&mut args, &arg, "a positive integer")?;
                 cli.cpus = value
                     .parse()
                     .ok()
@@ -125,7 +129,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                     })?;
             }
             "--jsx" => {
-                let value = flag_value(&mut args, &arg, "a value")?;
+                let value = required_flag_value(&mut args, &arg, "a value")?;
                 cli.options.jsx = match value.as_str() {
                     "automatic" => JsxRuntime::Automatic,
                     "classic" => JsxRuntime::Classic,
@@ -137,13 +141,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 };
             }
             "--jsx-import-source" => {
-                cli.options.jsx_import_source = Some(flag_value(&mut args, &arg, "a value")?);
+                cli.options.jsx_import_source =
+                    Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--jsx-pragma" => {
-                cli.options.jsx_pragma = Some(flag_value(&mut args, &arg, "a value")?);
+                cli.options.jsx_pragma = Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--jsx-pragma-frag" => {
-                cli.options.jsx_pragma_frag = Some(flag_value(&mut args, &arg, "a value")?);
+                cli.options.jsx_pragma_frag =
+                    Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--rewrite-extensions" => cli.options.rewrite_extensions = true,
             "--use-define-for-class-fields" => cli.options.use_define_for_class_fields = true,
@@ -153,7 +159,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
             "--emit-decorator-metadata" => cli.options.emit_decorator_metadata = true,
             "--no-strict-null-checks" => cli.options.no_strict_null_checks = true,
             "--target" => {
-                let target = flag_value(&mut args, &arg, "a value")?;
+                let target = required_flag_value(&mut args, &arg, "a value")?;
                 // Repeats the Bazel rule's attr allowlist: only whole ES versions that oxc can
                 // fully downlevel to. Rejects es5 (oxc cannot fully downlevel ES2015 syntax) and
                 // engine/browserslist targets, which EnvOptions::from_target would accept.
@@ -165,10 +171,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 cli.options.env = Some(EnvOptions::from_target(&target).expect("allowlisted target"));
             }
             "--helpers-module" => {
-                cli.options.helpers_module = Some(flag_value(&mut args, &arg, "a value")?);
+                cli.options.helpers_module =
+                    Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--module" => {
-                let value = flag_value(&mut args, &arg, "a value")?;
+                let value = required_flag_value(&mut args, &arg, "a value")?;
                 cli.options.module = match value.as_str() {
                     "preserve" => Module::Preserve,
                     "esm" => Module::Esm,
@@ -181,7 +188,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 };
             }
             "--manifest" => {
-                cli.manifest_path = Some(flag_value(&mut args, &arg, "a file path")?);
+                cli.manifest_path =
+                    Some(required_flag_value(&mut args, &arg, "a file path")?);
             }
             _ if arg.starts_with("--") => {
                 return Err(vec![format!("error: unknown flag \"{arg}\"")]);
@@ -245,7 +253,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
 }
 
 // Manifest entries contain a source followed by the enabled output paths. Empty paths skip output.
-fn read_entries(
+fn load_entries(
     options: &Options,
     manifest_path: Option<String>,
     positional: Vec<String>,
@@ -280,7 +288,11 @@ fn read_entries(
 }
 
 // Keep processing after failures and return errors in manifest order.
-fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Result<(), Vec<String>> {
+fn transpile_and_write_entries(
+    options: &Options,
+    cpus: usize,
+    entries: &[Entry],
+) -> Result<(), Vec<String>> {
     let transform_options = build_transform_options(options);
     let next = AtomicUsize::new(0);
     let mut errors: Vec<(usize, Vec<String>)> = thread::scope(|scope| {
@@ -296,7 +308,7 @@ fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Resul
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(entry) = entries.get(i) else { break errors };
-                        let entry_errors = worker.transpile_entry(entry);
+                        let entry_errors = worker.transpile_and_write_entry(entry);
                         if !entry_errors.is_empty() {
                             errors.push((i, entry_errors));
                         }
@@ -336,7 +348,7 @@ struct Worker<'a> {
 }
 
 impl Worker<'_> {
-    fn transpile_entry(&mut self, entry: &Entry) -> Vec<String> {
+    fn transpile_and_write_entry(&mut self, entry: &Entry) -> Vec<String> {
         // Declaration files have nothing to transpile and, matching tsc, are never emitted.
         if is_declaration_file(&entry.src) {
             return vec![format!(
@@ -353,16 +365,16 @@ impl Worker<'_> {
         // sourceRoot makes consumers resolve sources relative to a different base.
         let map_source = |out: &Option<String>| {
             if let Some(root_dir) = &self.options.source_root_dir {
-                return relative_to(Path::new(&entry.src), root_dir);
+                return path_relative_to(Path::new(&entry.src), root_dir);
             }
             out.as_deref()
                 .and_then(|out| Path::new(out).parent())
-                .map(|out_dir| relative_to(Path::new(&entry.src), out_dir))
+                .map(|out_dir| path_relative_to(Path::new(&entry.src), out_dir))
                 .unwrap_or_else(|| PathBuf::from(&entry.src))
         };
         let js_map_source = map_source(&entry.js_out);
         let dts_map_source = map_source(&entry.dts_out);
-        let outputs = match self.transpile(
+        let outputs = match self.transpile_source(
             &entry.src,
             &content,
             entry.js_out.is_some(),
@@ -397,7 +409,7 @@ impl Worker<'_> {
     }
 
     // Emit declarations before the transformer mutates the shared AST.
-    fn transpile(
+    fn transpile_source(
         &mut self,
         filename: &str,
         source_text: &str,
@@ -414,7 +426,7 @@ impl Worker<'_> {
         self.allocator.reset();
         let allocator = &self.allocator;
         let mut parser_ret = Parser::new(allocator, source_text, source_type).parse();
-        check(filename, source_text, parser_ret.diagnostics)?;
+        check_diagnostics(filename, source_text, parser_ret.diagnostics)?;
 
         let mut outputs = Outputs::default();
 
@@ -426,9 +438,9 @@ impl Worker<'_> {
                 },
             )
             .build(&parser_ret.program);
-            check(filename, source_text, decl_ret.diagnostics)?;
+            check_diagnostics(filename, source_text, decl_ret.diagnostics)?;
             let codegen_ret = Codegen::new()
-                .with_options(codegen_options(
+                .with_options(build_codegen_options(
                     self.options,
                     self.options.declaration_maps.then(|| dts_map_source.to_path_buf()),
                 ))
@@ -451,18 +463,18 @@ impl Worker<'_> {
                 Transformer::new(allocator, Path::new(filename), self.transform_options)
                     .build_with_scoping(scoping, &mut parser_ret.program);
             let diagnostics = semantic_diagnostics.into_iter().chain(transformer_ret.diagnostics);
-            check(filename, source_text, diagnostics)?;
+            check_diagnostics(filename, source_text, diagnostics)?;
 
             if self.options.module.is_commonjs() {
                 // The transformer may leave `export {}` after erasing type-only module syntax.
                 parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
                 let diagnostics =
                     commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
-                check(filename, source_text, diagnostics)?;
+                check_diagnostics(filename, source_text, diagnostics)?;
             }
 
             let codegen_ret = Codegen::new()
-                .with_options(codegen_options(
+                .with_options(build_codegen_options(
                     self.options,
                     (self.options.source_maps || self.options.inline_source_maps)
                         .then(|| js_map_source.to_path_buf()),
@@ -509,7 +521,7 @@ fn write_output(path: &str, code: &str, map: Option<&SourceMapOutput>) -> std::i
 }
 
 // Both paths are relative to the same root, or both are absolute.
-fn relative_to(target: &Path, base_dir: &Path) -> PathBuf {
+fn path_relative_to(target: &Path, base_dir: &Path) -> PathBuf {
     let mut target_parts = target
         .components()
         .filter(|component| *component != Component::CurDir)
@@ -543,7 +555,7 @@ struct Outputs {
     dts_map: Option<String>,
 }
 
-fn codegen_options(options: &Options, source_map_path: Option<PathBuf>) -> CodegenOptions {
+fn build_codegen_options(options: &Options, source_map_path: Option<PathBuf>) -> CodegenOptions {
     CodegenOptions {
         source_map_path,
         comments: if options.remove_comments {
@@ -674,7 +686,7 @@ fn commonjs_diagnostics(program: &Program, module_record: &ModuleRecord) -> Vec<
         .collect()
 }
 
-fn check(
+fn check_diagnostics(
     filename: &str,
     source_text: &str,
     diagnostics: impl IntoIterator<Item = OxcDiagnostic>,
@@ -743,7 +755,7 @@ mod tests {
             transform_options: &build_transform_options(options),
             allocator: Allocator::default(),
         }
-        .transpile(
+        .transpile_source(
             filename,
             source_text,
             options.emit_js,
@@ -1789,18 +1801,21 @@ export class C {
     }
 
     #[test]
-    fn relative_to_walks_up_to_common_ancestor() {
-        assert_eq!(relative_to(Path::new("main.ts"), Path::new(".")), PathBuf::from("main.ts"));
+    fn path_relative_to_walks_up_to_common_ancestor() {
         assert_eq!(
-            relative_to(Path::new("pkg/src/a.ts"), Path::new("bazel-out/bin/pkg/dist")),
+            path_relative_to(Path::new("main.ts"), Path::new(".")),
+            PathBuf::from("main.ts")
+        );
+        assert_eq!(
+            path_relative_to(Path::new("pkg/src/a.ts"), Path::new("bazel-out/bin/pkg/dist")),
             PathBuf::from("../../../../pkg/src/a.ts")
         );
         assert_eq!(
-            relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/src")),
+            path_relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/src")),
             PathBuf::from("a.ts")
         );
         assert_eq!(
-            relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/dist/sub")),
+            path_relative_to(Path::new("pkg/src/a.ts"), Path::new("pkg/dist/sub")),
             PathBuf::from("../../src/a.ts")
         );
     }

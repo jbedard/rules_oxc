@@ -678,7 +678,6 @@ struct TopLevelAwaitFinder {
 impl<'a> Visit<'a> for TopLevelAwaitFinder {
     fn visit_await_expression(&mut self, expr: &AwaitExpression<'a>) {
         self.spans.push(expr.span);
-        walk::walk_await_expression(self, expr);
     }
 
     fn visit_for_of_statement(&mut self, stmt: &ForOfStatement<'a>) {
@@ -692,8 +691,9 @@ impl<'a> Visit<'a> for TopLevelAwaitFinder {
     fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
         if decl.kind == VariableDeclarationKind::AwaitUsing {
             self.spans.push(decl.span);
+        } else {
+            walk::walk_variable_declaration(self, decl);
         }
-        walk::walk_variable_declaration(self, decl);
     }
 
     // Await inside any function belongs to that function, not the module.
@@ -1082,8 +1082,8 @@ mod tests {
     fn commonjs_rejects_top_level_await() {
         let err = transpile_single_err(
             "a.ts",
-            "async function load(): Promise<number> { return 1; }\n\
-             const value: number = await load();\nexport = value;\n",
+            "async function load(n: number): Promise<number> { return n; }\n\
+             const value: number = await load(await load(1));\nexport = value;\n",
             &commonjs_options(),
         );
         assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
@@ -1115,12 +1115,14 @@ mod tests {
     // `await using` at module scope is top-level await too.
     #[test]
     fn commonjs_rejects_top_level_await_using() {
-        let err = transpile_single_err(
-            "a.ts",
-            "declare const r: AsyncDisposable;\nawait using x = r;\nexport = x;\n",
-            &commonjs_options(),
-        );
-        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
+        for init in ["r", "await r"] {
+            let err = transpile_single_err(
+                "a.ts",
+                &format!("declare const r: AsyncDisposable;\nawait using x = {init};\nexport = x;\n"),
+                &commonjs_options(),
+            );
+            assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
+        }
     }
 
     #[test]

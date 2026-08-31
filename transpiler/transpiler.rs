@@ -332,14 +332,16 @@ fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Resul
         let workers: Vec<_> = (0..cpus.min(entries.len()))
             .map(|_| {
                 scope.spawn(|| {
-                    // One arena per worker, reset between files instead of reallocated.
-                    let mut allocator = Allocator::default();
+                    let mut worker = Worker {
+                        options,
+                        transform_options: &transform_options,
+                        allocator: Allocator::default(),
+                    };
                     let mut errors = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(entry) = entries.get(i) else { break errors };
-                        let entry_errors =
-                            transpile_entry(options, &transform_options, &mut allocator, entry);
+                        let entry_errors = worker.transpile_entry(entry);
                         if !entry_errors.is_empty() {
                             errors.push((i, entry_errors));
                         }
@@ -355,69 +357,180 @@ fn transpile_entries(options: &Options, cpus: usize, entries: &[Entry]) -> Resul
     if all_errors.is_empty() { Ok(()) } else { Err(all_errors) }
 }
 
-fn transpile_entry(
-    options: &Options,
-    transform_options: &TransformOptions,
-    allocator: &mut Allocator,
-    entry: &Entry,
-) -> Vec<String> {
-    // Declaration files have nothing to transpile and, matching tsc, are never emitted.
-    if is_declaration_file(&entry.src) {
-        return vec![format!(
-            "error: declaration file \"{}\" produces no outputs and cannot be a transpile entry",
-            entry.src
-        )];
-    }
-
-    let content = match fs::read_to_string(&entry.src) {
-        Ok(content) => content,
-        Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
-    };
-
-    // Source map consumers resolve `sources` against the map's own location — or, when
-    // sourceRoot is set, against that root, so sources are recorded relative to its directory.
-    let map_source = |out: &Option<String>| {
-        if let Some(root_dir) = &options.source_root_dir {
-            return relative_to(Path::new(&entry.src), root_dir);
+// Records --source-root in a codegen map. A macro rather than a function: the map type is not
+// re-exported by the oxc facade, so it is rebuilt from its parts through inference, not named.
+macro_rules! with_source_root {
+    ($map:expr, $options:expr) => {{
+        let mut map = $map;
+        if let Some(root) = &$options.source_root {
+            if let Some(m) = map.take() {
+                let mut parts = m.into_parts();
+                parts.source_root = Some(std::borrow::Cow::Owned(root.clone()));
+                map = Some(parts.into());
+            }
         }
-        out.as_deref()
-            .and_then(|out| Path::new(out).parent())
-            .map(|out_dir| relative_to(Path::new(&entry.src), out_dir))
-            .unwrap_or_else(|| PathBuf::from(&entry.src))
-    };
-    let outputs = match transpile_to(
-        allocator,
-        transform_options,
-        &entry.src,
-        &content,
-        options,
-        entry.js_out.is_some(),
-        entry.dts_out.is_some(),
-        &map_source(&entry.js_out),
-        &map_source(&entry.dts_out),
-    ) {
-        Ok(outputs) => outputs,
-        Err(errors) => return errors,
-    };
+        map
+    }};
+}
 
-    let mut errors = Vec::new();
-    if let (Some(js_out), Some(code)) = (&entry.js_out, outputs.js_code) {
-        let map = if options.inline_source_maps {
-            outputs.js_map_data_url.map(SourceMapOutput::Inline)
-        } else {
-            outputs.js_map.map(SourceMapOutput::File)
+// Per-thread transpile state: the arena is reset between files instead of reallocated.
+struct Worker<'a> {
+    options: &'a Options,
+    transform_options: &'a TransformOptions,
+    allocator: Allocator,
+}
+
+impl Worker<'_> {
+    fn transpile_entry(&mut self, entry: &Entry) -> Vec<String> {
+        // Declaration files have nothing to transpile and, matching tsc, are never emitted.
+        if is_declaration_file(&entry.src) {
+            return vec![format!(
+                "error: declaration file \"{}\" produces no outputs and cannot be a transpile entry",
+                entry.src
+            )];
+        }
+
+        let content = match fs::read_to_string(&entry.src) {
+            Ok(content) => content,
+            Err(e) => return vec![format!("error: cannot read {}: {e}", entry.src)],
         };
-        if let Err(e) = write_output(js_out, &code, map.as_ref()) {
-            errors.push(format!("error: cannot write {js_out}: {e}"));
+
+        // Source map consumers resolve `sources` against the map's own location — or, when
+        // sourceRoot is set, against that root, so sources are recorded relative to its directory.
+        let map_source = |out: &Option<String>| {
+            if let Some(root_dir) = &self.options.source_root_dir {
+                return relative_to(Path::new(&entry.src), root_dir);
+            }
+            out.as_deref()
+                .and_then(|out| Path::new(out).parent())
+                .map(|out_dir| relative_to(Path::new(&entry.src), out_dir))
+                .unwrap_or_else(|| PathBuf::from(&entry.src))
+        };
+        let js_map_source = map_source(&entry.js_out);
+        let dts_map_source = map_source(&entry.dts_out);
+        let outputs = match self.transpile(
+            &entry.src,
+            &content,
+            entry.js_out.is_some(),
+            entry.dts_out.is_some(),
+            &js_map_source,
+            &dts_map_source,
+        ) {
+            Ok(outputs) => outputs,
+            Err(errors) => return errors,
+        };
+
+        let mut errors = Vec::new();
+        if let (Some(js_out), Some(code)) = (&entry.js_out, outputs.js_code) {
+            let map = if self.options.inline_source_maps {
+                outputs.js_map_data_url.map(SourceMapOutput::Inline)
+            } else {
+                outputs.js_map.map(SourceMapOutput::File)
+            };
+            if let Err(e) = write_output(js_out, &code, map.as_ref()) {
+                errors.push(format!("error: cannot write {js_out}: {e}"));
+            }
         }
-    }
-    if let (Some(dts_out), Some(code)) = (&entry.dts_out, outputs.dts_code) {
-        let map = outputs.dts_map.map(SourceMapOutput::File);
-        if let Err(e) = write_output(dts_out, &code, map.as_ref()) {
-            errors.push(format!("error: cannot write {dts_out}: {e}"));
+        if let (Some(dts_out), Some(code)) = (&entry.dts_out, outputs.dts_code) {
+            let map = outputs.dts_map.map(SourceMapOutput::File);
+            if let Err(e) = write_output(dts_out, &code, map.as_ref()) {
+                errors.push(format!("error: cannot write {dts_out}: {e}"));
+            }
         }
+        errors
     }
-    errors
+
+    // Parses once and emits JS and/or declaration outputs from the same AST. Declarations are
+    // emitted first, before the transformer mutates the program. A source map is emitted only
+    // when its option is set; `js_map_source` and `dts_map_source` are the paths recorded in
+    // the respective source maps' `sources`.
+    fn transpile(
+        &mut self,
+        filename: &str,
+        source_text: &str,
+        emit_js: bool,
+        emit_dts: bool,
+        js_map_source: &Path,
+        dts_map_source: &Path,
+    ) -> Result<Outputs, Vec<String>> {
+        // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
+        let source_type = SourceType::from_path(filename)
+            .unwrap_or_default()
+            .with_typescript(true);
+
+        self.allocator.reset();
+        let allocator = &self.allocator;
+        let mut parser_ret = Parser::new(allocator, source_text, source_type).parse();
+        check(filename, source_text, parser_ret.diagnostics)?;
+
+        let mut outputs = Outputs::default();
+
+        if emit_dts {
+            let decl_ret = IsolatedDeclarations::new(
+                allocator,
+                OxcIsolatedDeclarationsOptions {
+                    strip_internal: self.options.strip_internal,
+                },
+            )
+            .build(&parser_ret.program);
+            check(filename, source_text, decl_ret.diagnostics)?;
+            let codegen_ret = Codegen::new()
+                .with_options(codegen_options(
+                    self.options,
+                    self.options.declaration_maps.then(|| dts_map_source.to_path_buf()),
+                ))
+                .build(&decl_ret.program);
+            outputs.dts_code = Some(codegen_ret.code);
+            outputs.dts_map =
+                with_source_root!(codegen_ret.map, self.options).map(|m| m.to_json_string());
+        }
+
+        if emit_js {
+            // oxc's own compiler configuration: the transformer needs pre-evaluated enum member
+            // values (string members are otherwise given reverse mappings), and roughly triples the
+            // scope and symbol counts.
+            let semantic_ret = SemanticBuilder::new_compiler()
+                .with_enum_eval(true)
+                .with_excess_capacity(2.0)
+                .build(&parser_ret.program);
+            let semantic_diagnostics = semantic_ret.diagnostics;
+            let scoping = semantic_ret.semantic.into_scoping();
+
+            let transformer_ret =
+                Transformer::new(allocator, Path::new(filename), self.transform_options)
+                    .build_with_scoping(scoping, &mut parser_ret.program);
+            let diagnostics = semantic_diagnostics.into_iter().chain(transformer_ret.diagnostics);
+            check(filename, source_text, diagnostics)?;
+
+            if self.options.module.is_commonjs() {
+                // An empty `export {}` — hand-written, or appended by the transformer after erasing a
+                // file's only module syntax — is dropped rather than rejected, matching tsc.
+                parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
+                let diagnostics =
+                    commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
+                check(filename, source_text, diagnostics)?;
+            }
+
+            let codegen_ret = Codegen::new()
+                .with_options(codegen_options(
+                    self.options,
+                    (self.options.source_maps || self.options.inline_source_maps)
+                        .then(|| js_map_source.to_path_buf()),
+                ))
+                .build(&parser_ret.program);
+
+            outputs.js_code = Some(codegen_ret.code);
+            // Only the emitted form is serialized: the data URL for inline maps, JSON otherwise.
+            let map = with_source_root!(codegen_ret.map, self.options);
+            if self.options.inline_source_maps {
+                outputs.js_map_data_url = map.as_ref().map(|m| m.to_data_url());
+            } else {
+                outputs.js_map = map.map(|m| m.to_json_string());
+            }
+        }
+
+        Ok(outputs)
+    }
 }
 
 enum SourceMapOutput {
@@ -490,22 +603,6 @@ fn codegen_options(options: &Options, source_map_path: Option<PathBuf>) -> Codeg
         },
         ..Default::default()
     }
-}
-
-// Records --source-root in a codegen map. A macro rather than a function: the map type is not
-// re-exported by the oxc facade, so it is rebuilt from its parts through inference, not named.
-macro_rules! with_source_root {
-    ($map:expr, $options:expr) => {{
-        let mut map = $map;
-        if let Some(root) = &$options.source_root {
-            if let Some(m) = map.take() {
-                let mut parts = m.into_parts();
-                parts.source_root = Some(std::borrow::Cow::Owned(root.clone()));
-                map = Some(parts.into());
-            }
-        }
-        map
-    }};
 }
 
 fn build_transform_options(options: &Options) -> TransformOptions {
@@ -641,131 +738,28 @@ fn commonjs_diagnostics(program: &Program, module_record: &ModuleRecord) -> Vec<
         .collect()
 }
 
-fn render_errors(
+// Fails with the rendered diagnostics, if any.
+fn check(
     filename: &str,
     source_text: &str,
     diagnostics: impl IntoIterator<Item = OxcDiagnostic>,
-) -> Vec<String> {
+) -> Result<(), Vec<String>> {
+    let mut diagnostics = diagnostics.into_iter().peekable();
+    if diagnostics.peek().is_none() {
+        return Ok(());
+    }
     let handler = GraphicalReportHandler::new().with_theme(GraphicalTheme::none());
     // Arc-shared so each diagnostic does not clone the whole source text.
     let source = std::sync::Arc::new(NamedSource::new(filename, source_text.to_string()));
-    diagnostics
-        .into_iter()
+    Err(diagnostics
         .map(|diagnostic| {
             let diagnostic = diagnostic.with_source_code(source.clone());
             let mut s = String::new();
             handler.render_report(&mut s, diagnostic.as_ref()).unwrap();
             s
         })
-        .collect()
+        .collect())
 }
-
-// Parses once and emits JS and/or declaration outputs from the same AST. Declarations are emitted
-// first, before the transformer mutates the program. `js_map_source` and `dts_map_source` are the
-// paths recorded in the respective source maps' `sources`.
-fn transpile_to(
-    allocator: &mut Allocator,
-    transform_options: &TransformOptions,
-    filename: &str,
-    source_text: &str,
-    options: &Options,
-    emit_js: bool,
-    emit_dts: bool,
-    js_map_source: &Path,
-    dts_map_source: &Path,
-) -> Result<Outputs, Vec<String>> {
-    // Every source is parsed as TypeScript, including plain .js/.jsx: one pipeline for all inputs.
-    let source_type = SourceType::from_path(filename)
-        .unwrap_or_default()
-        .with_typescript(true);
-
-    allocator.reset();
-    let allocator = &*allocator;
-    let mut parser_ret = Parser::new(allocator, source_text, source_type).parse();
-
-    let mut outputs = Outputs::default();
-
-    if !parser_ret.diagnostics.is_empty() {
-        return Err(render_errors(filename, source_text, parser_ret.diagnostics));
-    }
-
-    if emit_dts {
-        let decl_ret = IsolatedDeclarations::new(
-            allocator,
-            OxcIsolatedDeclarationsOptions {
-                strip_internal: options.strip_internal,
-            },
-        )
-        .build(&parser_ret.program);
-
-        if !decl_ret.diagnostics.is_empty() {
-            return Err(render_errors(filename, source_text, decl_ret.diagnostics));
-        }
-
-        let codegen_ret = Codegen::new()
-            .with_options(codegen_options(
-                options,
-                options.declaration_maps.then(|| dts_map_source.to_path_buf()),
-            ))
-            .build(&decl_ret.program);
-        outputs.dts_code = Some(codegen_ret.code);
-        outputs.dts_map = with_source_root!(codegen_ret.map, options).map(|m| m.to_json_string());
-    }
-
-    if emit_js {
-        // oxc's own compiler configuration: the transformer needs pre-evaluated enum member
-        // values (string members are otherwise given reverse mappings), and roughly triples the
-        // scope and symbol counts.
-        let semantic_ret = SemanticBuilder::new_compiler()
-            .with_enum_eval(true)
-            .with_excess_capacity(2.0)
-            .build(&parser_ret.program);
-        let semantic_diagnostics = semantic_ret.diagnostics;
-        let scoping = semantic_ret.semantic.into_scoping();
-
-        let transformer_ret = Transformer::new(allocator, Path::new(filename), transform_options)
-            .build_with_scoping(scoping, &mut parser_ret.program);
-
-        let diagnostics: Vec<_> = semantic_diagnostics
-            .into_iter()
-            .chain(transformer_ret.diagnostics)
-            .collect();
-        if !diagnostics.is_empty() {
-            return Err(render_errors(filename, source_text, diagnostics));
-        }
-
-        if options.module.is_commonjs() {
-            // An empty `export {}` — hand-written, or appended by the transformer after erasing a
-            // file's only module syntax — is dropped rather than rejected, matching tsc.
-            parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
-            let diagnostics =
-                commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
-            if !diagnostics.is_empty() {
-                return Err(render_errors(filename, source_text, diagnostics));
-            }
-        }
-
-        let codegen_ret = Codegen::new()
-            .with_options(codegen_options(
-                options,
-                (options.source_maps || options.inline_source_maps)
-                    .then(|| js_map_source.to_path_buf()),
-            ))
-            .build(&parser_ret.program);
-
-        outputs.js_code = Some(codegen_ret.code);
-        // Only the emitted form is serialized: the data URL for inline maps, JSON otherwise.
-        let map = with_source_root!(codegen_ret.map, options);
-        if options.inline_source_maps {
-            outputs.js_map_data_url = map.as_ref().map(|m| m.to_data_url());
-        } else {
-            outputs.js_map = map.map(|m| m.to_json_string());
-        }
-    }
-
-    Ok(outputs)
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -797,15 +791,16 @@ mod tests {
         source_text: &str,
         options: &Options,
     ) -> Result<Outputs, Vec<String>> {
-        let Options { emit_js, emit_dts, .. } = *options;
-        transpile_to(
-            &mut Allocator::default(),
-            &build_transform_options(options),
+        Worker {
+            options,
+            transform_options: &build_transform_options(options),
+            allocator: Allocator::default(),
+        }
+        .transpile(
             filename,
             source_text,
-            options,
-            emit_js,
-            emit_dts,
+            options.emit_js,
+            options.emit_dts,
             Path::new(filename),
             Path::new(filename),
         )

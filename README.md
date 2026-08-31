@@ -15,6 +15,10 @@ bazel_dep(name = "aspect_rules_oxc", version = "0.0.0")
 To use a commit rather than a release, use `archive_override` or `git_override` in
 your `MODULE.bazel`.
 
+## API docs
+
+- [oxc_transpiler](docs/oxc.md)
+
 ## Usage with rules_ts
 
 Use `oxc_transpiler` as the `ts_project` transpiler to emit JavaScript with oxc

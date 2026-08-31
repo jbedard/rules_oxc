@@ -1,0 +1,14 @@
+load("@bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@stardoc//stardoc:stardoc.bzl", "stardoc")
+
+stardoc(
+    name = "oxc_docgen",
+    out = "oxc_docgen.md",
+    input = "//oxc:defs.bzl",
+    deps = ["//oxc:defs"],
+)
+
+write_source_files(
+    name = "update",
+    files = {"oxc.md": ":oxc_docgen"},
+)

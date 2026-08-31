@@ -1,9 +1,6 @@
 """OXC transpiler rule producing JavaScript and/or TypeScript declaration outputs."""
 
 load("@aspect_rules_js//js:providers.bzl", "JsInfo")
-
-# buildifier: disable=bzl-visibility
-load("@aspect_rules_ts//ts/private:ts_lib.bzl", "lib")
 load("@bazel_lib//lib:copy_file.bzl", "COPY_FILE_TOOLCHAINS", "copy_file_action")
 
 # Output extension for each input extension.
@@ -40,12 +37,24 @@ def _default_cpus(src_count):
 def _is_declaration(path):
     return path.endswith(".d.ts") or path.endswith(".d.mts") or path.endswith(".d.cts")
 
-def _out_path(src, out_dir, root_dir):
-    """Compute output path from a source label or relative path string.
+def _files_relative_to_package(ctx, files):
+    """Package-relative paths for a list of files, computing the prefixes only once."""
+    bin_dir_prefix = ctx.bin_dir.path + "/"
+    workspace_prefix = ctx.label.workspace_name + "/"
+    package_prefix = ctx.label.package + "/" if ctx.label.package else None
 
-    Mirrors the logic of lib.to_out_path so that loading-time and analysis-time
-    calculations produce the same paths.
-    """
+    paths = []
+    for file in files:
+        path = file.path.removeprefix(bin_dir_prefix)
+        path = path.removeprefix("external/")
+        path = path.removeprefix(workspace_prefix)
+        if package_prefix:
+            path = path.removeprefix(package_prefix)
+        paths.append(path)
+    return paths
+
+def _out_path(src, out_dir, root_dir):
+    """Compute output path from a source label or relative path string."""
     src = src[src.find(":") + 1:]  # strip "pkg:" prefix if present
     if out_dir and src.startswith(out_dir + "/"):
         return src
@@ -277,7 +286,7 @@ def _oxc_transpiler_impl(ctx):
     map_outs = []
     dts_map_outs = []
 
-    src_paths = lib.files_relative_to_package(ctx, ctx.files.srcs)
+    src_paths = _files_relative_to_package(ctx, ctx.files.srcs)
 
     for src, src_path in zip(ctx.files.srcs, src_paths):
         if _is_declaration(src_path):
@@ -294,7 +303,7 @@ def _oxc_transpiler_impl(ctx):
         # matching tsc/ts_project, where the mistake surfaces in the typecheck instead.
         if src_path.endswith(".json"):
             if ctx.attr.emit_js and ctx.attr.emit_json:
-                out_path = lib.to_out_path(src_path, out_dir, root_dir)
+                out_path = _out_path(src_path, out_dir, root_dir)
                 out = _declare(ctx, predeclared, out_path)
                 copy_file_action(ctx, src, out)
                 json_outs.append(out)
@@ -312,7 +321,7 @@ def _oxc_transpiler_impl(ctx):
 
         if ctx.attr.emit_js:
             out_path = src_path[:ext_idx] + _JS_EXT_MAP.get(src_ext, ".js")
-            out_path = lib.to_out_path(out_path, out_dir, root_dir)
+            out_path = _out_path(out_path, out_dir, root_dir)
             out = _declare(ctx, predeclared, out_path)
             js_outs.append(out)
             transpile_js_outs.append(out)
@@ -325,7 +334,7 @@ def _oxc_transpiler_impl(ctx):
                 transpile_dts_outs.append(None)
             else:
                 out_path = src_path[:ext_idx] + _DTS_EXT_MAP.get(src_ext, ".d.ts")
-                out_path = lib.to_out_path(out_path, declaration_dir, root_dir)
+                out_path = _out_path(out_path, declaration_dir, root_dir)
                 out = _declare(ctx, predeclared, out_path)
                 dts_outs.append(out)
                 transpile_dts_outs.append(out)

@@ -13,5 +13,4 @@ export class Vec {
 		return Math.sqrt(this.x * this.x + this.y * this.y);
 	}
 }
-
 //# sourceMappingURL=main.js.map

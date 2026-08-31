@@ -1,0 +1,15 @@
+load("@aspect_rules_js//npm:defs.bzl", "npm_package")
+
+package(default_testonly = True)
+
+# Stands in for a published helpers package (e.g. @oxc-project/runtime) so
+# runtime tests can resolve helper imports without a registry or lockfile.
+npm_package(
+    name = "custom_helpers",
+    srcs = [
+        "helpers/asyncToGenerator.js",
+        "package.json",
+    ],
+    package = "custom-helpers",
+    visibility = ["//oxc/tests:__pkg__"],
+)

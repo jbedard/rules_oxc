@@ -1,0 +1,8 @@
+{
+  "name": "custom-helpers",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./helpers/*": "./helpers/*.js"
+  }
+}

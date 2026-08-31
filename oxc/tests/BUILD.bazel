@@ -1,4 +1,5 @@
-load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+load("@aspect_rules_js//npm:defs.bzl", "npm_link_package")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
@@ -1654,4 +1655,49 @@ failure_test(
     name = "negative_cpus_test",
     expected_failure = "cpus must be positive, or 0 to derive it from the number of srcs",
     target_under_test = ":transpile_negative_cpus",
+)
+
+# Runtime tests: execute transpiled output under node. Fixtures are .mts so
+# the .mjs outputs run as ESM without a package.json, and assert with
+# node:assert so a failure exits nonzero (unhandled rejections included).
+oxc_transpiler(
+    name = "transpile_rt_smoke",
+    srcs = [
+        "src/rt/lib.mts",
+        "src/rt/smoke_check.mts",
+    ],
+    out_dir = "rt",
+    root_dir = "src/rt",
+)
+
+# Type stripping and verbatim relative imports produce runnable ESM.
+js_test(
+    name = "rt_smoke_test",
+    size = "small",
+    data = ["rt/lib.mjs"],
+    entry_point = "rt/smoke_check.mjs",
+)
+
+# The emitted bare helper specifier (custom-helpers/helpers/asyncToGenerator,
+# no extension) resolves through a real package exports map, and the
+# downleveled async function behaves like the original at runtime.
+npm_link_package(
+    name = "node_modules/custom-helpers",
+    src = "//oxc/tests/runtime_helpers:custom_helpers",
+)
+
+oxc_transpiler(
+    name = "transpile_rt_helpers",
+    srcs = ["src/rt/async_check.mts"],
+    helpers_module = "custom-helpers",
+    out_dir = "rthelpers",
+    root_dir = "src/rt",
+    target = "es2016",
+)
+
+js_test(
+    name = "rt_helpers_test",
+    size = "small",
+    data = [":node_modules/custom-helpers"],
+    entry_point = "rthelpers/async_check.mjs",
 )

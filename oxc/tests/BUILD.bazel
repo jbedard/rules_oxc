@@ -1622,3 +1622,36 @@ failure_test(
     expected_failure = "source_maps and inline_source_maps require emit_js",
     target_under_test = ":transpile_inline_source_maps_no_js",
 )
+
+# cpus only parallelizes the transpile action; outputs are unchanged.
+oxc_transpiler(
+    name = "transpile_cpus",
+    srcs = [
+        "src/main.ts",
+        "src/util.mts",
+    ],
+    cpus = 2,
+    out_dir = "cpustest",
+    root_dir = "src",
+)
+
+diff_test(
+    name = "cpus_test",
+    file1 = "cpustest/main.js",
+    file2 = "snapshots/main.js",
+)
+
+oxc_transpiler(
+    name = "transpile_negative_cpus",
+    srcs = ["src/main.ts"],
+    cpus = -1,
+    out_dir = "negcpus",
+    root_dir = "src",
+    tags = ["manual"],
+)
+
+failure_test(
+    name = "negative_cpus_test",
+    expected_failure = "cpus must be positive, or 0 to derive it from the number of srcs",
+    target_under_test = ":transpile_negative_cpus",
+)

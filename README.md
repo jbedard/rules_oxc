@@ -1,16 +1,32 @@
 # Aspect's Bazel rules for oxc
 
-`aspect_rules_oxc` is maintained by [Aspect Build](https://aspect.build).
+Bazel rules for [oxc](https://oxc.rs), a fast JavaScript/TypeScript toolchain
+written in Rust; see the [oxc GitHub repository](https://github.com/oxc-project/oxc).
+
+These rules run oxc's transpiler to convert TypeScript and JSX sources to
+JavaScript, and can also emit `.d.ts` declarations via oxc's isolated
+declarations support. Transpilation runs as a prebuilt native binary — no
+Node.js toolchain involved. It can be used standalone, or configured as the
+`ts_project` transpiler for
+[rules_ts](https://github.com/aspect-build/rules_ts) so tsc typechecks while
+oxc emits.
+
+## More from Aspect
+
+rules_oxc is just a part of what [Aspect Build](https://aspect.build) provides:
+
+- _Need help?_ This ruleset has support provided by https://aspect.build/services.
+- See our other Bazel rules, especially those built for rules_js, linked from
+  https://github.com/aspect-build
 
 ## Installation
 
 Requires Bazel 8.6 or greater with bzlmod (WORKSPACE is not supported).
 
-Add to your `MODULE.bazel` file:
-
-```starlark
-bazel_dep(name = "aspect_rules_oxc", version = "0.0.0")
-```
+Add a `bazel_dep` on `aspect_rules_oxc` to your `MODULE.bazel`, using the
+snippet from the [latest release](https://github.com/aspect-build/rules_oxc/releases)
+or the version on the
+[Bazel Central Registry](https://registry.bazel.build/modules/aspect_rules_oxc).
 
 To use a commit rather than a release, use `archive_override` or `git_override` in
 your `MODULE.bazel`.
@@ -117,3 +133,7 @@ no coherent consumer here.
 
 Extension rewriting applies to any specifier containing a slash, including
 bare package paths like `"pkg/util.ts"`, where tsc only rewrites relative ones.
+
+# Telemetry & privacy policy
+
+This ruleset collects limited usage data via [`tools_telemetry`](https://github.com/aspect-build/tools_telemetry), which is reported to Aspect Build Inc and governed by our [privacy policy](https://www.aspect.build/privacy-policy).

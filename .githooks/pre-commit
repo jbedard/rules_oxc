@@ -4,6 +4,19 @@ set -euo pipefail
 repository_root="$(git rev-parse --show-toplevel)"
 
 if ! (
+    cd "${repository_root}"
+    bazel run //.github/workflows:buildifier.check
+); then
+    (
+        cd "${repository_root}"
+        bazel run //.github/workflows:buildifier.fix
+    )
+    echo >&2
+    echo "Buildifier reformatted files. Review and stage the changes." >&2
+    exit 1
+fi
+
+if ! (
     cd "${repository_root}/transpiler"
     bazel test --lockfile_mode=error //:rustfmt_test
 ); then

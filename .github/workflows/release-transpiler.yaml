@@ -36,7 +36,7 @@ jobs:
 
       - name: bazel build //:transpiler
         working-directory: transpiler
-        run: bazel build --compilation_mode=opt //:transpiler
+        run: bazel build --compilation_mode=opt --platforms=@rules_rs//rs/platforms:${{ matrix.platform.triple }} //:transpiler
 
       - name: rename binary
         working-directory: transpiler

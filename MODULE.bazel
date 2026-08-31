@@ -24,26 +24,26 @@ use_repo(tel, "aspect_tools_telemetry_report")
 # happens in //oxc/private:transpiler.
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
-TRANSPILER_VERSION = "0.0.7"
+TRANSPILER_VERSION = "0.0.8"
 
 http_file(
     name = "transpiler_aarch64_apple_darwin",
     executable = True,
-    sha256 = "c2dd0d406c18ae8c3bb2831adb262255c6d52dd111419deea9827187f967fde1",
+    sha256 = "abd177f3bb242ec387ca55e96046a8895cb8239458f0748a99897782f1929dc4",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-apple-darwin",
 )
 
 http_file(
     name = "transpiler_aarch64_unknown_linux_gnu",
     executable = True,
-    sha256 = "e0a78abcc11afaea1f5000f6ca5973e23a7358bf8245df1a43330611926eaf66",
+    sha256 = "767a004b7d2d2c9a97346c1ea40fed6520e383765a40a3ffd8c7d83a7471753f",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-aarch64-unknown-linux-gnu",
 )
 
 http_file(
     name = "transpiler_x86_64_unknown_linux_gnu",
     executable = True,
-    sha256 = "3cb988c8b770f8fc0964c6e72ea74cd8bee9f7513a1dcd86106f6768663ea412",
+    sha256 = "ae4fbed6af10b898ea5433ec8bc7afb8c0508e70b791fa2edffc6c55bc74680d",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-x86_64-unknown-linux-gnu",
 )
 

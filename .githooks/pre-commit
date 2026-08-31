@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(git rev-parse --show-toplevel)"
+
+if ! (
+    cd "${repository_root}/transpiler"
+    bazel test --lockfile_mode=error //:rustfmt_test
+); then
+    echo >&2
+    echo "Rust formatting check failed." >&2
+    echo "Run '(cd transpiler && bazel run @rules_rust//:rustfmt)' and stage the result." >&2
+    exit 1
+fi

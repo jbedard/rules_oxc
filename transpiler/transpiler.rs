@@ -786,6 +786,22 @@ mod tests {
         fs::read_to_string(path).unwrap()
     }
 
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn run_in(
+        dir: &Path,
+        flags: &[&str],
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<(), Vec<String>> {
+        let mut cli: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+        cli.extend(paths.into_iter().map(|p| dir.join(p).to_str().unwrap().to_string()));
+        run(cli.into_iter())
+    }
+
     fn transpile(
         filename: &str,
         source_text: &str,
@@ -832,6 +848,17 @@ mod tests {
     // JS output of a successful transpile; panics with the rendered errors otherwise.
     fn transpile_js(filename: &str, source_text: &str, options: &Options) -> String {
         transpile(filename, source_text, options).unwrap().js_code.unwrap()
+    }
+
+    // Rendered errors of a failed transpile, joined; panics if it succeeds.
+    fn transpile_err(filename: &str, source_text: &str, options: &Options) -> String {
+        transpile(filename, source_text, options).unwrap_err().concat()
+    }
+
+    fn transpile_single_err(filename: &str, source_text: &str, options: &Options) -> String {
+        let errors = transpile(filename, source_text, options).unwrap_err();
+        assert_eq!(errors.len(), 1, "errors: {errors:?}");
+        errors.into_iter().next().unwrap()
     }
 
     #[test]
@@ -962,27 +989,18 @@ mod tests {
     // instead of rewriting it.
     #[test]
     fn esm_rejects_export_assignment() {
-        let errors =
-            transpile("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options()).unwrap_err();
-        assert!(
-            errors.concat().contains("Export assignment cannot be used"),
-            "errors: {:?}",
-            errors
-        );
+        let err = transpile_err("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
+        assert!(err.contains("Export assignment cannot be used"), "{err}");
     }
 
     #[test]
     fn esm_rejects_import_equals() {
-        let errors = transpile(
+        let err = transpile_err(
             "a.ts",
             "import path = require(\"node:path\");\nexport const s: string = path.sep;\n",
             &esm_options(),
-        ).unwrap_err();
-        assert!(
-            errors.concat().contains("Import assignment cannot be used"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("Import assignment cannot be used"), "{err}");
     }
 
     #[test]
@@ -1034,73 +1052,52 @@ mod tests {
     // matched by the empty-export drop, and is rejected like any other ESM syntax.
     #[test]
     fn commonjs_rejects_sourced_empty_export() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.cts",
             "const x: number = 1;\nexport = x;\nexport {} from \"./setup.cjs\";\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert!(
-            errors[0].contains("cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("cannot be emitted as CommonJS"), "{err}");
     }
 
     #[test]
     fn commonjs_rejects_esm_import() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.cts",
             "import { x } from \"./b.cjs\";\nexport = x;\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert!(
-            errors[0].contains("cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("cannot be emitted as CommonJS"), "{err}");
     }
 
     #[test]
     fn commonjs_rejects_esm_export() {
-        let errors =
-            transpile("a.cts", "export const x: number = 1;\n", &commonjs_options()).unwrap_err();
-        assert!(
-            errors[0].contains("cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
-        );
+        let err =
+            transpile_single_err("a.cts", "export const x: number = 1;\n", &commonjs_options());
+        assert!(err.contains("cannot be emitted as CommonJS"), "{err}");
     }
 
     // Uses a .ts source: the parser already rejects top-level await in .cts files.
     #[test]
     fn commonjs_rejects_top_level_await() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.ts",
             "async function load(): Promise<number> { return 1; }\n\
              const value: number = await load();\nexport = value;\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert!(
-            errors[0].contains("top-level await cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
     }
 
     #[test]
     fn commonjs_rejects_top_level_for_await() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.ts",
             "declare const items: AsyncIterable<Promise<number>>;\n\
              for await (const item of items) { await item; }\nexport = 1;\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert_eq!(errors.len(), 1, "errors: {errors:?}");
-        assert!(
-            errors[0].contains("top-level await cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
     }
 
     // Await inside a function is not top-level and stays valid in CommonJS.
@@ -1118,16 +1115,12 @@ mod tests {
     // `await using` at module scope is top-level await too.
     #[test]
     fn commonjs_rejects_top_level_await_using() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.ts",
             "declare const r: AsyncDisposable;\nawait using x = r;\nexport = x;\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert!(
-            errors[0].contains("top-level await cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
     }
 
     #[test]
@@ -1145,16 +1138,12 @@ mod tests {
     // record; Node rejects it in CommonJS files. (.ts source: the parser already rejects it in .cts.)
     #[test]
     fn commonjs_rejects_import_meta() {
-        let errors = transpile(
+        let err = transpile_single_err(
             "a.ts",
             "const url: string = import.meta.url;\nexport = url;\n",
             &commonjs_options(),
-        ).unwrap_err();
-        assert!(
-            errors[0].contains("import.meta cannot be emitted as CommonJS"),
-            "errors: {:?}",
-            errors
         );
+        assert!(err.contains("import.meta cannot be emitted as CommonJS"), "{err}");
     }
 
     // Without --module the behavior is unchanged: `export =` is still rewritten (oxc does that in
@@ -1279,18 +1268,11 @@ export const x: number = 1;
     #[test]
     fn only_remove_type_imports_keeps_unused_imports() {
         let src = "import { sideEffect } from \"./fx.js\";\nimport type { T } from \"./t.js\";\nexport const x: number = 1;\n";
-        let elided =
-            transpile("a.ts", src, &Options { emit_dts: false, ..default_options() }).unwrap();
-        let js = elided.js_code.unwrap();
+        let js = transpile_js("a.ts", src, &js_options());
         assert!(!js.contains("./fx.js"), "js: {js}");
 
-        let options = Options {
-            emit_dts: false,
-            only_remove_type_imports: true,
-            ..default_options()
-        };
-        let kept = transpile("a.ts", src, &options).unwrap();
-        let js = kept.js_code.unwrap();
+        let options = Options { only_remove_type_imports: true, ..js_options() };
+        let js = transpile_js("a.ts", src, &options);
         assert!(js.contains("import { sideEffect } from \"./fx.js\""), "js: {js}");
         assert!(!js.contains("./t.js"), "js: {js}");
     }
@@ -1325,17 +1307,12 @@ export const x: number = 1;
     // remain as field definitions instead of being removed.
     #[test]
     fn use_define_for_class_fields_keeps_field_definitions() {
-        let options = Options {
-            emit_dts: false,
-            use_define_for_class_fields: true,
-            ..default_options()
-        };
-        let result = transpile(
+        let options = Options { use_define_for_class_fields: true, ..js_options() };
+        let js = transpile_js(
             "a.ts",
             "export class C { declared: number; assigned = 1; }\n",
             &options,
-        ).unwrap();
-        let js = result.js_code.unwrap();
+        );
         assert!(js.contains("declared"), "js: {js}");
         assert!(js.contains("assigned = 1"), "js: {js}");
     }
@@ -1346,8 +1323,7 @@ export const x: number = 1;
             source_maps: true,
             ..default_options()
         };
-        let result = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
-        let map = result.js_map.unwrap();
+        let map = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap().js_map.unwrap();
         assert!(map.contains("\"a.ts\""), "map: {map}");
     }
 
@@ -1494,13 +1470,8 @@ export const x: number = 1;
     // jsxImportSource: the automatic runtime imports from the given module.
     #[test]
     fn jsx_import_source_changes_runtime_module() {
-        let options = Options {
-            emit_dts: false,
-            jsx_import_source: Some("preact".to_string()),
-            ..default_options()
-        };
-        let result = transpile("a.tsx", "export const el = <div />;\n", &options).unwrap();
-        let js = result.js_code.unwrap();
+        let options = Options { jsx_import_source: Some("preact".to_string()), ..js_options() };
+        let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
         assert!(js.contains("\"preact/jsx-runtime\""), "js: {js}");
         assert!(!js.contains("\"react/jsx-runtime\""), "js: {js}");
     }
@@ -1510,18 +1481,16 @@ export const x: number = 1;
     #[test]
     fn jsx_pragma_changes_classic_factory() {
         let options = Options {
-            emit_dts: false,
             jsx: JsxRuntime::Classic,
             jsx_pragma: Some("h".to_string()),
             jsx_pragma_frag: Some("Fragment".to_string()),
-            ..default_options()
+            ..js_options()
         };
-        let result = transpile(
+        let js = transpile_js(
             "a.tsx",
             "import { h, Fragment } from \"preact\";\nexport const el = <div><span /></div>;\nexport const frag = <></>;\n",
             &options,
-        ).unwrap();
-        let js = result.js_code.unwrap();
+        );
         assert!(js.contains("h(\"div\""), "js: {js}");
         assert!(js.contains("h(Fragment"), "js: {js}");
         assert!(js.contains("import { h, Fragment } from \"preact\""), "js: {js}");
@@ -1577,9 +1546,9 @@ export const x: number = 1;
     #[test]
     fn transpile_emits_specifiers_verbatim() {
         let dir = test_dir("transpile_verbatim");
-        fs::write(dir.join("b.ts"), "").unwrap();
+        write_file(&dir, "b.ts", "");
         fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::write(dir.join("sub/index.ts"), "").unwrap();
+        write_file(&dir, "sub/index.ts", "");
         let src = dir.join("a.ts");
         let js = transpile_js(
             src.to_str().unwrap(),
@@ -1610,7 +1579,7 @@ export const x: number = 1;
     #[test]
     fn transpile_leaves_extensionless_dynamic_import() {
         let dir = test_dir("transpile_dynamic_import_extensionless");
-        fs::write(dir.join("b.ts"), "").unwrap();
+        write_file(&dir, "b.ts", "");
         for rewrite_extensions in [false, true] {
             let options = Options { rewrite_extensions, ..js_options() };
             let src = dir.join("a.ts");
@@ -1790,52 +1759,31 @@ export class C {
     #[test]
     fn run_reports_unreadable_manifest() {
         let dir = test_dir("run_missing_manifest");
-        let manifest = dir.join("missing.txt");
-        let err = run(args(&["--emit-js", "--manifest", manifest.to_str().unwrap()])).unwrap_err();
+        let err = run_in(&dir, &["--emit-js", "--manifest"], ["missing.txt"]).unwrap_err();
         assert!(err[0].starts_with("error: cannot read manifest"), "{err:?}");
     }
 
     #[test]
     fn run_rejects_misaligned_entries() {
         let dir = test_dir("run_misaligned");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x = 1;\n").unwrap();
+        write_file(&dir, "a.ts", "export const x = 1;\n");
         // --emit-js and --emit-dts expect 3 lines per entry; give 2.
-        let err = run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            src.to_str().unwrap(),
-            dir.join("a.js").to_str().unwrap(),
-        ]))
-        .unwrap_err();
+        let err = run_in(&dir, &["--emit-js", "--emit-dts"], ["a.ts", "a.js"]).unwrap_err();
         assert!(err[0].contains("expected entries of 3 lines"), "{err:?}");
     }
 
     #[test]
     fn run_transpiles_manifest_entries() {
         let dir = test_dir("run_manifest");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        let src = write_file(&dir, "a.ts", "export const x: number = 1;\n");
         let js_out = dir.join("out/a.js");
         let dts_out = dir.join("out/a.d.ts");
-        let manifest = dir.join("manifest.txt");
-        fs::write(
-            &manifest,
-            format!(
-                "{}\n{}\n{}\n",
-                src.display(),
-                js_out.display(),
-                dts_out.display()
-            ),
-        )
-        .unwrap();
-        run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            "--manifest",
-            manifest.to_str().unwrap(),
-        ]))
-        .unwrap();
+        write_file(
+            &dir,
+            "manifest.txt",
+            &format!("{}\n{}\n{}\n", src.display(), js_out.display(), dts_out.display()),
+        );
+        run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"]).unwrap();
         assert!(read(&js_out).contains("export const x = 1"));
         assert!(read(&dts_out).contains("declare const x: number"));
     }
@@ -1843,52 +1791,36 @@ export class C {
     #[test]
     fn run_transpiles_positional_entries() {
         let dir = test_dir("run_positional");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
-        let js_out = dir.join("a.out.js");
-        run(args(&[
-            "--emit-js",
-            src.to_str().unwrap(),
-            js_out.to_str().unwrap(),
-        ]))
-        .unwrap();
-        assert!(read(&js_out).contains("export const x = 1"));
+        write_file(&dir, "a.ts", "export const x: number = 1;\n");
+        run_in(&dir, &["--emit-js"], ["a.ts", "a.out.js"]).unwrap();
+        assert!(read(&dir.join("a.out.js")).contains("export const x = 1"));
     }
 
     #[test]
     fn run_accepts_cpu_count() {
         let dir = test_dir("run_parallel");
-        let first = dir.join("first.ts");
-        let second = dir.join("second.ts");
-        fs::write(&first, "export const first: number = 1;\n").unwrap();
-        fs::write(&second, "export const second: number = 2;\n").unwrap();
-        let first_out = dir.join("out/first.js");
-        let second_out = dir.join("out/second.js");
-        run(args(&[
-            "--emit-js",
-            "--cpus",
-            "2",
-            first.to_str().unwrap(),
-            first_out.to_str().unwrap(),
-            second.to_str().unwrap(),
-            second_out.to_str().unwrap(),
-        ]))
+        write_file(&dir, "first.ts", "export const first: number = 1;\n");
+        write_file(&dir, "second.ts", "export const second: number = 2;\n");
+        run_in(
+            &dir,
+            &["--emit-js", "--cpus", "2"],
+            ["first.ts", "out/first.js", "second.ts", "out/second.js"],
+        )
         .unwrap();
-        assert!(read(&first_out).contains("export const first = 1"));
-        assert!(read(&second_out).contains("export const second = 2"));
+        assert!(read(&dir.join("out/first.js")).contains("export const first = 1"));
+        assert!(read(&dir.join("out/second.js")).contains("export const second = 2"));
     }
 
     #[test]
     fn run_reports_parallel_errors_in_manifest_order() {
         let dir = test_dir("run_parallel_error_order");
-        let mut cli = vec!["--emit-js".to_string(), "--cpus".to_string(), "2".to_string()];
+        let mut paths = Vec::new();
         for i in 0..6 {
-            let src = dir.join(format!("{i}.ts"));
-            fs::write(&src, "export const x: number = ;\n").unwrap();
-            cli.push(src.to_str().unwrap().to_string());
-            cli.push(dir.join(format!("out/{i}.js")).to_str().unwrap().to_string());
+            write_file(&dir, &format!("{i}.ts"), "export const x: number = ;\n");
+            paths.push(format!("{i}.ts"));
+            paths.push(format!("out/{i}.js"));
         }
-        let err = run(cli.into_iter()).unwrap_err();
+        let err = run_in(&dir, &["--emit-js", "--cpus", "2"], &paths).unwrap_err();
         let reported: Vec<_> = err
             .iter()
             .filter_map(|e| e.split('/').last()?.split(':').next().map(str::to_string))
@@ -1900,23 +1832,15 @@ export class C {
     #[test]
     fn run_skips_entries_with_empty_output_path() {
         let dir = test_dir("run_empty_dts");
-        let src = dir.join("a.js");
-        fs::write(&src, "export const x = 1;\n").unwrap();
+        let src = write_file(&dir, "a.js", "export const x = 1;\n");
         let js_out = dir.join("out/a.js");
-        let manifest = dir.join("manifest.txt");
         // Plain JS entry: empty declaration output line means no dts emitted.
-        fs::write(
-            &manifest,
-            format!("{}\n{}\n\n", src.display(), js_out.display()),
-        )
-        .unwrap();
-        run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            "--manifest",
-            manifest.to_str().unwrap(),
-        ]))
-        .unwrap();
+        write_file(
+            &dir,
+            "manifest.txt",
+            &format!("{}\n{}\n\n", src.display(), js_out.display()),
+        );
+        run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"]).unwrap();
         assert!(read(&js_out).contains("export const x = 1"));
         assert!(!dir.join("out/a.d.ts").exists());
     }
@@ -1927,22 +1851,15 @@ export class C {
     fn run_rejects_declaration_file_entries() {
         let dir = test_dir("run_dts_rejected");
         for name in ["a.d.ts", "a.d.mts", "a.d.cts"] {
-            let src = dir.join(name);
-            fs::write(&src, "export declare const x: number;\n").unwrap();
-            let dts_out = dir.join("out").join(name);
-            let manifest = dir.join("manifest.txt");
-            fs::write(
-                &manifest,
-                format!("{}\n\n{}\n", src.display(), dts_out.display()),
-            )
-            .unwrap();
-            let err = run(args(&[
-                "--emit-js",
-                "--emit-dts",
-                "--manifest",
-                manifest.to_str().unwrap(),
-            ]))
-            .unwrap_err();
+            let src = write_file(&dir, name, "export declare const x: number;\n");
+            let dts_out = dir.join(format!("out/{name}"));
+            write_file(
+                &dir,
+                "manifest.txt",
+                &format!("{}\n\n{}\n", src.display(), dts_out.display()),
+            );
+            let err = run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"])
+                .unwrap_err();
             assert!(err[0].contains("produces no outputs"), "{err:?}");
             assert!(!dts_out.exists());
         }
@@ -1951,17 +1868,9 @@ export class C {
     #[test]
     fn run_appends_source_mapping_url_and_writes_map() {
         let dir = test_dir("run_source_maps");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
-        let js_out = dir.join("out/a.js");
-        run(args(&[
-            "--emit-js",
-            "--source-maps",
-            src.to_str().unwrap(),
-            js_out.to_str().unwrap(),
-        ]))
-        .unwrap();
-        let js = read(&js_out);
+        write_file(&dir, "a.ts", "export const x: number = 1;\n");
+        run_in(&dir, &["--emit-js", "--source-maps"], ["a.ts", "out/a.js"]).unwrap();
+        let js = read(&dir.join("out/a.js"));
         assert!(js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"), "js: {js}");
         // The source is recorded relative to the map's directory.
         let map = read(&dir.join("out/a.js.map"));
@@ -1993,24 +1902,18 @@ export class C {
     #[test]
     fn run_writes_declaration_map_relative_to_declaration_dir() {
         let dir = test_dir("run_declaration_maps");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        write_file(&dir, "a.ts", "export const x: number = 1;\n");
         fs::create_dir_all(dir.join("types")).unwrap();
-        let js_out = dir.join("out/a.js");
-        let dts_out = dir.join("types/a.d.ts");
-        run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            "--declaration-maps",
-            src.to_str().unwrap(),
-            js_out.to_str().unwrap(),
-            dts_out.to_str().unwrap(),
-        ]))
+        run_in(
+            &dir,
+            &["--emit-js", "--emit-dts", "--declaration-maps"],
+            ["a.ts", "out/a.js", "types/a.d.ts"],
+        )
         .unwrap();
         // Only the declaration gets a map: --source-maps was not given.
         assert!(!dir.join("out/a.js.map").exists());
-        assert!(!read(&js_out).contains("sourceMappingURL"));
-        let dts = read(&dts_out);
+        assert!(!read(&dir.join("out/a.js")).contains("sourceMappingURL"));
+        let dts = read(&dir.join("types/a.d.ts"));
         assert!(dts.ends_with("//# sourceMappingURL=a.d.ts.map"), "dts: {dts}");
         let map = read(&dir.join("types/a.d.ts.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
@@ -2035,68 +1938,46 @@ export class C {
     #[test]
     fn run_writes_successful_entries_while_aggregating_errors() {
         let dir = test_dir("run_error_aggregation");
-        let bad1 = dir.join("bad1.ts");
-        let bad2 = dir.join("bad2.ts");
-        let good = dir.join("good.ts");
-        fs::write(&bad1, "const = ;").unwrap();
-        fs::write(&bad2, "const = ;").unwrap();
-        fs::write(&good, "export const x = 1;\n").unwrap();
-        let good_out = dir.join("out/good.js");
-        let err = run(args(&[
-            "--emit-js",
-            bad1.to_str().unwrap(),
-            dir.join("out/bad1.js").to_str().unwrap(),
-            bad2.to_str().unwrap(),
-            dir.join("out/bad2.js").to_str().unwrap(),
-            good.to_str().unwrap(),
-            good_out.to_str().unwrap(),
-        ]))
+        write_file(&dir, "bad1.ts", "const = ;");
+        write_file(&dir, "bad2.ts", "const = ;");
+        write_file(&dir, "good.ts", "export const x = 1;\n");
+        let err = run_in(
+            &dir,
+            &["--emit-js"],
+            ["bad1.ts", "out/bad1.js", "bad2.ts", "out/bad2.js", "good.ts", "out/good.js"],
+        )
         .unwrap_err();
         // Both failing entries are reported, while successful entries are written immediately.
         assert!(err.len() >= 2, "errors: {err:?}");
-        assert!(good_out.exists());
+        assert!(dir.join("out/good.js").exists());
     }
 
     #[test]
     fn run_writes_js_maps_and_declarations_before_later_errors() {
         let dir = test_dir("run_streams_all_output_kinds");
-        let good = dir.join("good.ts");
-        let bad = dir.join("bad.ts");
-        fs::write(&good, "export const x: number = 1;\n").unwrap();
-        fs::write(&bad, "const = ;").unwrap();
-        let js_out = dir.join("out/good.js");
-        let dts_out = dir.join("out/good.d.ts");
-        let err = run(args(&[
-            "--emit-js",
-            "--emit-dts",
-            "--source-maps",
-            good.to_str().unwrap(),
-            js_out.to_str().unwrap(),
-            dts_out.to_str().unwrap(),
-            bad.to_str().unwrap(),
-            dir.join("out/bad.js").to_str().unwrap(),
-            dir.join("out/bad.d.ts").to_str().unwrap(),
-        ]))
+        write_file(&dir, "good.ts", "export const x: number = 1;\n");
+        write_file(&dir, "bad.ts", "const = ;");
+        let err = run_in(
+            &dir,
+            &["--emit-js", "--emit-dts", "--source-maps"],
+            ["good.ts", "out/good.js", "out/good.d.ts", "bad.ts", "out/bad.js", "out/bad.d.ts"],
+        )
         .unwrap_err();
 
         assert!(!err.is_empty(), "errors: {err:?}");
-        assert!(js_out.exists());
-        assert!(js_out.with_extension("js.map").exists());
-        assert!(dts_out.exists());
+        assert!(dir.join("out/good.js").exists());
+        assert!(dir.join("out/good.js.map").exists());
+        assert!(dir.join("out/good.d.ts").exists());
     }
 
     // A write failure is reported as an error like any other, not a panic.
     #[test]
     fn run_reports_unwritable_output() {
         let dir = test_dir("run_unwritable_output");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
+        write_file(&dir, "a.ts", "export const x: number = 1;\n");
         // A plain file where the output's parent directory should be.
-        let blocker = dir.join("blocker");
-        fs::write(&blocker, "").unwrap();
-        let out = blocker.join("a.js");
-        let err =
-            run(args(&["--emit-js", src.to_str().unwrap(), out.to_str().unwrap()])).unwrap_err();
+        write_file(&dir, "blocker", "");
+        let err = run_in(&dir, &["--emit-js"], ["a.ts", "blocker/a.js"]).unwrap_err();
         assert!(err[0].starts_with("error: cannot write"), "{err:?}");
     }
 
@@ -2104,11 +1985,8 @@ export class C {
     #[test]
     fn run_does_not_create_output_directories() {
         let dir = test_dir("run_missing_output_dir");
-        let src = dir.join("a.ts");
-        fs::write(&src, "export const x: number = 1;\n").unwrap();
-        let out = dir.join("missing/a.js");
-        let err =
-            run(args(&["--emit-js", src.to_str().unwrap(), out.to_str().unwrap()])).unwrap_err();
+        write_file(&dir, "a.ts", "export const x: number = 1;\n");
+        let err = run_in(&dir, &["--emit-js"], ["a.ts", "missing/a.js"]).unwrap_err();
         assert!(err[0].starts_with("error: cannot write"), "{err:?}");
         assert!(!dir.join("missing").exists());
     }
@@ -2117,16 +1995,12 @@ export class C {
     #[test]
     fn run_aggregates_read_errors_across_entries() {
         let dir = test_dir("run_read_error_aggregation");
-        let missing = dir.join("missing.ts");
-        let bad = dir.join("bad.ts");
-        fs::write(&bad, "const = ;").unwrap();
-        let err = run(args(&[
-            "--emit-js",
-            missing.to_str().unwrap(),
-            dir.join("out/missing.js").to_str().unwrap(),
-            bad.to_str().unwrap(),
-            dir.join("out/bad.js").to_str().unwrap(),
-        ]))
+        write_file(&dir, "bad.ts", "const = ;");
+        let err = run_in(
+            &dir,
+            &["--emit-js"],
+            ["missing.ts", "out/missing.js", "bad.ts", "out/bad.js"],
+        )
         .unwrap_err();
         assert!(err.len() >= 2, "errors: {err:?}");
         assert!(err[0].contains("cannot read"), "errors: {err:?}");

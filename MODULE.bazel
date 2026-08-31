@@ -13,16 +13,11 @@ bazel_dep(name = "platforms", version = "1.1.0")
 # For the JsInfo provider.
 bazel_dep(name = "aspect_rules_js", version = "3.0.1")
 
-# For ts_lib.files_relative_to_package()
-bazel_dep(name = "aspect_rules_ts", version = "3.9.1")
+# Telemetry
 bazel_dep(name = "aspect_tools_telemetry", version = "0.5.2")
 
 tel = use_extension("@aspect_tools_telemetry//:extension.bzl", "telemetry")
 use_repo(tel, "aspect_tools_telemetry_report")
-
-bazel_dep(name = "gazelle", version = "0.53.0", dev_dependency = True)
-bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.8.2", dev_dependency = True)
-bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)
 
 # Prebuilt transpiler binaries, built from the isolated module in
 # transpiler/ and published to GitHub releases. Platform selection
@@ -51,3 +46,8 @@ http_file(
     sha256 = "3cb988c8b770f8fc0964c6e72ea74cd8bee9f7513a1dcd86106f6768663ea412",
     url = "https://github.com/aspect-build/rules_oxc/releases/download/transpiler-v" + TRANSPILER_VERSION + "/transpiler-x86_64-unknown-linux-gnu",
 )
+
+# Dev/testing
+bazel_dep(name = "gazelle", version = "0.53.0", dev_dependency = True)
+bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.8.2", dev_dependency = True)
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)

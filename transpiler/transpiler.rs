@@ -562,8 +562,14 @@ fn write_output(path: &str, code: &str, map: Option<&SourceMapOutput>) -> std::i
 // `target` expressed relative to `base_dir`, with both paths relative to the same root (or both
 // absolute), as Bazel passes exec-root-relative source and output paths.
 fn relative_to(target: &Path, base_dir: &Path) -> PathBuf {
-    let mut target_parts = target.components().peekable();
-    let mut base_parts = base_dir.components().peekable();
+    let mut target_parts = target
+        .components()
+        .filter(|component| *component != Component::CurDir)
+        .peekable();
+    let mut base_parts = base_dir
+        .components()
+        .filter(|component| *component != Component::CurDir)
+        .peekable();
     loop {
         match (target_parts.peek(), base_parts.peek()) {
             (Some(t), Some(b)) if t == b => {}
@@ -1923,6 +1929,7 @@ export class C {
 
     #[test]
     fn relative_to_walks_up_to_common_ancestor() {
+        assert_eq!(relative_to(Path::new("main.ts"), Path::new(".")), PathBuf::from("main.ts"));
         assert_eq!(
             relative_to(Path::new("pkg/src/a.ts"), Path::new("bazel-out/bin/pkg/dist")),
             PathBuf::from("../../../../pkg/src/a.ts")

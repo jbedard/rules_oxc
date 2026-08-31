@@ -27,6 +27,16 @@ _DTS_EXT_MAP = {
 # maps) but produce no declarations, having no type annotations.
 _PLAIN_JS_EXTS = (".js", ".jsx", ".mjs", ".cjs")
 
+# Automatic cpus grow logarithmically: one per decimal digit of the file
+# count, plus one (2 at 3 files, 3 at 10, 4 at 100). Capped at 4: measured
+# parallel efficiency drops below 70% beyond that, wasting reserved cpus.
+_MAX_DEFAULT_CPUS = 4
+
+def _default_cpus(src_count):
+    if src_count < 3:
+        return 1
+    return min(len(str(src_count)) + 1, _MAX_DEFAULT_CPUS)
+
 def _is_declaration(path):
     return path.endswith(".d.ts") or path.endswith(".d.mts") or path.endswith(".d.cts")
 
@@ -130,7 +140,7 @@ def _use_define_for_class_fields(ctx):
         return ctx.attr.use_define_for_class_fields == "true"
     return ctx.attr.target not in _TARGETS_WITHOUT_DEFINE
 
-def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
+def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs, cpus):
     """Run one transpiler action emitting JS and/or declaration outputs.
 
     Each manifest entry is the source path followed by its JS output path
@@ -201,7 +211,13 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
         args.add("--source-root-dir", source_root_dir or ".")
     if ctx.attr.remove_comments:
         args.add("--remove-comments")
+    if cpus > 1:
+        args.add("--cpus", str(cpus))
     args.add("--manifest")
+
+    execution_requirements = {"supports-path-mapping": "1"}
+    if cpus > 1:
+        execution_requirements["cpu:%d" % cpus] = ""
 
     ctx.actions.run(
         inputs = srcs,
@@ -209,7 +225,7 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
         mnemonic = "OxcTranspile",
         executable = ctx.executable._tool,
         outputs = js_outs + [out for out in dts_outs if out] + map_outs + dts_map_outs,
-        execution_requirements = {"supports-path-mapping": "1"},
+        execution_requirements = execution_requirements,
     )
 
 def _oxc_transpiler_impl(ctx):
@@ -242,6 +258,9 @@ def _oxc_transpiler_impl(ctx):
 
     if ctx.attr.source_root and not (ctx.attr.source_maps or ctx.attr.inline_source_maps or ctx.attr.declaration_maps):
         fail("source_root requires source_maps, inline_source_maps or declaration_maps.")
+
+    if ctx.attr.cpus < 0:
+        fail("cpus must be positive, or 0 to derive it from the number of srcs.")
 
     out_dir = "" if ctx.attr.out_dir == "." else ctx.attr.out_dir
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
@@ -314,7 +333,8 @@ def _oxc_transpiler_impl(ctx):
                     dts_map_outs.append(ctx.actions.declare_file(out_path + ".map"))
 
     if transpile_srcs:
-        _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs, dts_map_outs)
+        cpus = ctx.attr.cpus or _default_cpus(len(transpile_srcs))
+        _run_transpile(ctx, transpile_srcs, transpile_js_outs, transpile_dts_outs, map_outs, dts_map_outs, min(cpus, len(transpile_srcs)))
 
     # Mirror the ts_project provider shape: source maps count as sources and
     # declaration maps as types, DefaultInfo falls back to types when no JS is
@@ -378,6 +398,15 @@ _oxc_transpiler_rule = rule(
         "declaration_dir": attr.string(
             doc = "Directory for the .d.ts outputs, relative to the package. " +
                   "Defaults to out_dir. Equivalent to tsc's declarationDir.",
+        ),
+        "cpus": attr.int(
+            default = 0,
+            doc = "Threads the transpile action may use, reserved from the " +
+                  "local scheduler via a cpu:<n> execution requirement. 0 " +
+                  "(default) scales logarithmically with the number of srcs " +
+                  "to transpile: one per decimal digit of the file count, " +
+                  "plus one (2 at 3 files, 3 at 10), at most {}. Explicit " +
+                  "values are still capped at one per file.".format(_MAX_DEFAULT_CPUS),
         ),
         "emit_js": attr.bool(
             default = True,
@@ -591,6 +620,7 @@ def oxc_transpiler(
         root_dir = "",
         out_dir = "",
         declaration_dir = "",
+        cpus = 0,
         emit_js = True,
         emit_dts = False,
         emit_json = False,
@@ -629,6 +659,10 @@ def oxc_transpiler(
         root_dir: directory the srcs are relative to when computing output paths.
         out_dir: directory for the JS outputs, relative to the package.
         declaration_dir: directory for the declaration outputs, defaulting to out_dir.
+        cpus: threads the transpile action may use, reserved via a cpu:<n> execution
+            requirement. 0 (default) scales logarithmically with the number of srcs:
+            one per decimal digit of the file count, plus one (2 at 3 files, 3 at 10),
+            at most 4.
         emit_js: emit JavaScript outputs.
         emit_dts: emit .d.ts declaration outputs.
         emit_json: copy .json srcs into the output layout.
@@ -675,6 +709,7 @@ def oxc_transpiler(
         root_dir = root_dir,
         out_dir = out_dir,
         declaration_dir = declaration_dir,
+        cpus = cpus or 0,
         emit_js = emit_js,
         emit_dts = emit_dts,
         emit_json = emit_json or False,

@@ -3,6 +3,7 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
 load("//oxc:defs.bzl", "oxc_transpiler")
+load(":failure_test.bzl", "failure_test")
 
 package(default_testonly = True)
 
@@ -1448,6 +1449,56 @@ diff_test(
     file2 = "snapshots/main.js",
 )
 
+# out_dir/declaration_dir = "." are the package root: root_dir is stripped and
+# no prefix is added, like leaving them unset with root_dir set.
+oxc_transpiler(
+    name = "transpile_out_dir_dot",
+    srcs = ["src/mod.cts"],
+    declaration_dir = ".",
+    emit_dts = True,
+    out_dir = ".",
+    root_dir = "src",
+)
+
+build_test(
+    name = "out_dir_dot_outputs_test",
+    targets = [
+        "mod.cjs",
+        "mod.d.cts",
+    ],
+)
+
+diff_test(
+    name = "js_out_dir_dot_test",
+    file1 = "mod.cjs",
+    file2 = "snapshots/mod.cjs",
+)
+
+# declaration_dir = "." alone: the explicit package root wins over the
+# out_dir fallback, so only the JS outputs land under out_dir.
+oxc_transpiler(
+    name = "transpile_declaration_dir_dot",
+    srcs = ["src/util.mts"],
+    declaration_dir = ".",
+    emit_dts = True,
+    out_dir = "dotddts",
+    root_dir = "src",
+)
+
+build_test(
+    name = "declaration_dir_dot_outputs_test",
+    targets = [
+        "dotddts/util.mjs",
+        "util.d.mts",
+    ],
+)
+
+diff_test(
+    name = "dts_declaration_dir_dot_test",
+    file1 = "util.d.mts",
+    file2 = "snapshots/util.d.mts",
+)
+
 # srcs given as labels rather than paths: the package prefix is stripped when
 # computing the pre-declared outputs.
 oxc_transpiler(
@@ -1534,4 +1585,40 @@ diff_test(
     name = "json_target_test",
     file1 = ":json_target_output",
     file2 = "src/data.json",
+)
+
+# Source maps only exist for the JS emit: requesting either kind without
+# emit_js is an analysis error rather than a silent no-op.
+oxc_transpiler(
+    name = "transpile_source_maps_no_js",
+    srcs = ["src/main.ts"],
+    emit_dts = True,
+    emit_js = False,
+    out_dir = "mapsnojs",
+    root_dir = "src",
+    source_maps = True,
+    tags = ["manual"],
+)
+
+failure_test(
+    name = "source_maps_require_emit_js_test",
+    expected_failure = "source_maps and inline_source_maps require emit_js",
+    target_under_test = ":transpile_source_maps_no_js",
+)
+
+oxc_transpiler(
+    name = "transpile_inline_source_maps_no_js",
+    srcs = ["src/main.ts"],
+    emit_dts = True,
+    emit_js = False,
+    inline_source_maps = True,
+    out_dir = "inlinemapsnojs",
+    root_dir = "src",
+    tags = ["manual"],
+)
+
+failure_test(
+    name = "inline_source_maps_require_emit_js_test",
+    expected_failure = "source_maps and inline_source_maps require emit_js",
+    target_under_test = ":transpile_inline_source_maps_no_js",
 )

@@ -139,15 +139,18 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
     """
     emit_dts = ctx.attr.emit_dts and any(dts_outs)
 
-    manifest_lines = []
+    manifest_entries = []
     for i in range(len(srcs)):
-        manifest_lines.append(srcs[i].path)
+        manifest_entries.append(srcs[i])
         if js_outs:
-            manifest_lines.append(js_outs[i].path)
+            manifest_entries.append(js_outs[i])
         if emit_dts:
-            manifest_lines.append(dts_outs[i].path if dts_outs[i] else "")
-    manifest = ctx.actions.declare_file(ctx.label.name + "_manifest.txt")
-    ctx.actions.write(manifest, "\n".join(manifest_lines) + "\n")
+            manifest_entries.append(dts_outs[i] if dts_outs[i] else "")
+
+    manifest_args = ctx.actions.args()
+    manifest_args.add_all(manifest_entries)
+    manifest_args.use_param_file("%s", use_always = True)
+    manifest_args.set_param_file_format("multiline")
 
     args = ctx.actions.args()
     if js_outs:
@@ -199,11 +202,10 @@ def _run_transpile(ctx, srcs, js_outs, dts_outs, map_outs, dts_map_outs):
     if ctx.attr.remove_comments:
         args.add("--remove-comments")
     args.add("--manifest")
-    args.add(manifest)
 
     ctx.actions.run(
-        inputs = srcs + [manifest],
-        arguments = [args],
+        inputs = srcs,
+        arguments = [args, manifest_args],
         mnemonic = "OxcTranspile",
         executable = ctx.executable._tool,
         outputs = js_outs + [out for out in dts_outs if out] + map_outs + dts_map_outs,
@@ -235,10 +237,15 @@ def _oxc_transpiler_impl(ctx):
     if ctx.attr.source_maps and ctx.attr.inline_source_maps:
         fail("source_maps and inline_source_maps are mutually exclusive.")
 
+    if (ctx.attr.source_maps or ctx.attr.inline_source_maps) and not ctx.attr.emit_js:
+        fail("source_maps and inline_source_maps require emit_js.")
+
     if ctx.attr.source_root and not (ctx.attr.source_maps or ctx.attr.inline_source_maps or ctx.attr.declaration_maps):
         fail("source_root requires source_maps, inline_source_maps or declaration_maps.")
 
+    out_dir = "" if ctx.attr.out_dir == "." else ctx.attr.out_dir
     declaration_dir = ctx.attr.declaration_dir or ctx.attr.out_dir
+    declaration_dir = "" if declaration_dir == "." else declaration_dir
     root_dir = "" if ctx.attr.root_dir == "." else ctx.attr.root_dir
     predeclared = {f.short_path: f for f in ctx.outputs.js_outs + ctx.outputs.dts_outs + ctx.outputs.json_outs}
 
@@ -268,7 +275,7 @@ def _oxc_transpiler_impl(ctx):
         # matching tsc/ts_project, where the mistake surfaces in the typecheck instead.
         if src_path.endswith(".json"):
             if ctx.attr.emit_js and ctx.attr.emit_json:
-                out_path = lib.to_out_path(src_path, ctx.attr.out_dir, ctx.attr.root_dir)
+                out_path = lib.to_out_path(src_path, out_dir, root_dir)
                 out = _declare(ctx, predeclared, out_path)
                 copy_file_action(ctx, src, out)
                 json_outs.append(out)
@@ -286,7 +293,7 @@ def _oxc_transpiler_impl(ctx):
 
         if ctx.attr.emit_js:
             out_path = src_path[:ext_idx] + _JS_EXT_MAP.get(src_ext, ".js")
-            out_path = lib.to_out_path(out_path, ctx.attr.out_dir, ctx.attr.root_dir)
+            out_path = lib.to_out_path(out_path, out_dir, root_dir)
             out = _declare(ctx, predeclared, out_path)
             js_outs.append(out)
             transpile_js_outs.append(out)
@@ -299,7 +306,7 @@ def _oxc_transpiler_impl(ctx):
                 transpile_dts_outs.append(None)
             else:
                 out_path = src_path[:ext_idx] + _DTS_EXT_MAP.get(src_ext, ".d.ts")
-                out_path = lib.to_out_path(out_path, declaration_dir, ctx.attr.root_dir)
+                out_path = lib.to_out_path(out_path, declaration_dir, root_dir)
                 out = _declare(ctx, predeclared, out_path)
                 dts_outs.append(out)
                 transpile_dts_outs.append(out)
@@ -357,7 +364,8 @@ _oxc_transpiler_rule = rule(
         "srcs": attr.label_list(
             allow_files = True,
             default = [],
-            doc = "TypeScript source files to transpile.",
+            doc = "Source files to transpile: .ts/.tsx and their module " +
+                  "variants, plain JS, .json, or targets providing them.",
         ),
         # Pre-declared at loading time so that labels like "dist/src/foo.js" in
         # attributes of downstream targets resolve to these generated files
@@ -563,6 +571,10 @@ def _clean_dir(path):
         return "."
     return path.removeprefix("./")
 
+def _clean_out_dir(path):
+    """Resolve an out_dir/declaration_dir to an output prefix: "." (the package root) means none."""
+    return "" if path == "." else path
+
 def _tristate(value):
     """Map None/True/False to the rule's string attribute; a select() of those strings passes through."""
     if value == None:
@@ -646,9 +658,9 @@ def oxc_transpiler(
     _oxc_transpiler_rule(
         name = name,
         srcs = srcs,
-        js_outs = _calculate_outs(srcs, _to_js_out, out_dir, root_dir) if emit_js else [],
-        dts_outs = _calculate_outs(srcs, _to_dts_out, declaration_dir or out_dir, root_dir) if emit_dts else [],
-        json_outs = _calculate_outs(srcs, _to_json_out, out_dir, root_dir) if emit_js and emit_json else [],
+        js_outs = _calculate_outs(srcs, _to_js_out, _clean_out_dir(out_dir), root_dir) if emit_js else [],
+        dts_outs = _calculate_outs(srcs, _to_dts_out, _clean_out_dir(declaration_dir or out_dir), root_dir) if emit_dts else [],
+        json_outs = _calculate_outs(srcs, _to_json_out, _clean_out_dir(out_dir), root_dir) if emit_js and emit_json else [],
         root_dir = root_dir,
         out_dir = out_dir,
         declaration_dir = declaration_dir,

@@ -63,4 +63,5 @@ jobs:
             --repo ${{ github.repository }} \
             --title ${{ github.ref_name }} \
             --notes "Prebuilt transpiler binaries for rules_oxc." \
+            --latest=false \
             transpiler-*

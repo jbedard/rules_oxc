@@ -15,7 +15,86 @@ bazel_dep(name = "aspect_rules_oxc", version = "0.0.0")
 To use a commit rather than a release, use `archive_override` or `git_override` in
 your `MODULE.bazel`.
 
+## Usage with rules_ts
+
+Use `oxc_transpiler` as the `ts_project` transpiler to emit JavaScript with oxc
+while tsc typechecks:
+
+```starlark
+load("@aspect_rules_oxc//oxc:defs.bzl", "oxc_transpiler")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@bazel_skylib//lib:partial.bzl", "partial")
+
+ts_project(
+    name = "lib",
+    srcs = glob(["src/**/*.ts"]),
+    out_dir = "dist",
+    root_dir = "src",
+    transpiler = partial.make(
+        oxc_transpiler,
+        out_dir = "dist",
+        root_dir = "src",
+    ),
+)
+```
+
+`ts_project` does not forward `out_dir` and `root_dir` to the transpiler, so
+they are repeated in `partial.make`.
+
+Projects with `isolatedDeclarations` in their tsconfig can also set
+`emit_dts = True` to emit the `.d.ts` outputs with oxc, replacing tsc's
+declaration emit; see the
+[ts_project e2e](e2e/ts_project/README.md) for that wiring and other
+configurations.
+
+## Performance
+
+Each `oxc_transpiler` target transpiles all of its `srcs` in a single
+multi-threaded action, rather than one action per file as `rules_swc` does.
+Fewer actions means less scheduling and process-spawn overhead, at the cost of
+coarser incrementality: changing one source re-transpiles every file in the
+target.
+
+The action reserves CPUs from Bazel's local scheduler via the `cpus` attribute.
+By default it scales logarithmically with the number of `srcs` (2 threads at 3
+files, 3 at 10, 4 at 100, capped at 4); set `cpus` explicitly to override.
+
 ## Limitations
+
+### No typechecking
+
+Sources are transpiled independently without type information. Pair with a
+typechecker such as `ts_project` (see above), which also surfaces oxc-invalid
+code like non-isolated declarations.
+
+### Declaration emit requires isolated declarations
+
+`emit_dts` uses oxc's isolated declarations emit: every exported symbol needs
+an explicit type annotation, and a non-inferable export is a build error where
+tsc would infer the type. Set `isolatedDeclarations: true` in the tsconfig so
+the typecheck enforces the same rules.
+
+### No ESM-to-CommonJS transform
+
+`module = "commonjs"` only transforms TypeScript's CommonJS-specific syntax
+(`export =`, `import x = require(...)`); ESM import/export syntax in the
+sources is an error. tsc's `module: commonjs` converts ESM syntax as well.
+
+### No `es5` target
+
+The lowest `target` is es2015: oxc cannot fully downlevel ES2015 syntax.
+
+### Runtime helpers are always imported
+
+Transforms that need a runtime helper import it from `@oxc-project/runtime`
+(or `helpers_module`), which must then be a runtime dependency. There is no
+inline-helper mode: behavior is always like tsc's `importHelpers: true`, with
+oxc's runtime in place of `tslib`.
+
+### No standard decorator transform
+
+Only the legacy `experimental_decorators` transform is available. Standard
+(TC39) decorators are emitted as written, so the runtime must support them.
 
 ### No `jsx=preserve` equivalent
 

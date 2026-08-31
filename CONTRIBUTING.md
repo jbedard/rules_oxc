@@ -3,6 +3,18 @@
 ## Formatting
 
 Starlark files should be formatted by buildifier.
+Rust files should be formatted with the formatter from the pinned Bazel toolchain:
+
+```shell
+(cd transpiler && bazel run @rules_rust//:rustfmt)
+```
+
+Enable the checked-in pre-commit hook once per clone:
+
+```shell
+git config core.hooksPath .githooks
+```
+
 CI will yell at you about formatting/linting violations.
 
 ## Updating BUILD files

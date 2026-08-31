@@ -1,5 +1,6 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rustfmt_test")
 
 rust_binary(
     name = "transpiler",
@@ -14,4 +15,9 @@ rust_test(
     name = "transpiler_test",
     size = "small",
     crate = ":transpiler",
+)
+
+rustfmt_test(
+    name = "rustfmt_test",
+    targets = [":transpiler"],
 )

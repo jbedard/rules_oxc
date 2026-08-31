@@ -14,8 +14,8 @@ use oxc::semantic::SemanticBuilder;
 use oxc::span::{GetSpan, SourceType, Span};
 use oxc::syntax::{module_record::ModuleRecord, scope::ScopeFlags};
 use oxc::transformer::{
-    CompilerAssumptions, DecoratorOptions, EnvOptions, HelperLoaderOptions, JsxOptions,
-    JsxRuntime, Module, RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
+    CompilerAssumptions, DecoratorOptions, EnvOptions, HelperLoaderOptions, JsxOptions, JsxRuntime,
+    Module, RewriteExtensionsMode, TransformOptions, Transformer, TypeScriptOptions,
 };
 use std::fs;
 use std::io::Write;
@@ -70,11 +70,17 @@ fn required_flag_value(
     flag: &str,
     what: &str,
 ) -> Result<String, Vec<String>> {
-    args.next().ok_or_else(|| vec![format!("error: {flag} requires {what}")])
+    args.next()
+        .ok_or_else(|| vec![format!("error: {flag} requires {what}")])
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), Vec<String>> {
-    let Cli { options, cpus, manifest_path, positional } = parse_args(args)?;
+    let Cli {
+        options,
+        cpus,
+        manifest_path,
+        positional,
+    } = parse_args(args)?;
     let entries = load_entries(&options, manifest_path, positional)?;
     transpile_and_write_entries(&options, cpus, &entries)
 }
@@ -110,12 +116,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 cli.options.source_root = Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--source-root-dir" => {
-                cli.options.source_root_dir =
-                    Some(PathBuf::from(required_flag_value(
-                        &mut args,
-                        &arg,
-                        "a directory path",
-                    )?));
+                cli.options.source_root_dir = Some(PathBuf::from(required_flag_value(
+                    &mut args,
+                    &arg,
+                    "a directory path",
+                )?));
             }
             "--remove-comments" => cli.options.remove_comments = true,
             "--cpus" => {
@@ -125,7 +130,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                     .ok()
                     .filter(|cpus: &usize| *cpus > 0)
                     .ok_or_else(|| {
-                        vec![format!("error: --cpus must be a positive integer, got \"{value}\"")]
+                        vec![format!(
+                            "error: --cpus must be a positive integer, got \"{value}\""
+                        )]
                     })?;
             }
             "--jsx" => {
@@ -168,11 +175,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                         "error: unsupported --target \"{target}\": expected es6, es2015..es2026, or esnext"
                     )]);
                 }
-                cli.options.env = Some(EnvOptions::from_target(&target).expect("allowlisted target"));
+                cli.options.env =
+                    Some(EnvOptions::from_target(&target).expect("allowlisted target"));
             }
             "--helpers-module" => {
-                cli.options.helpers_module =
-                    Some(required_flag_value(&mut args, &arg, "a value")?);
+                cli.options.helpers_module = Some(required_flag_value(&mut args, &arg, "a value")?);
             }
             "--module" => {
                 let value = required_flag_value(&mut args, &arg, "a value")?;
@@ -188,8 +195,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
                 };
             }
             "--manifest" => {
-                cli.manifest_path =
-                    Some(required_flag_value(&mut args, &arg, "a file path")?);
+                cli.manifest_path = Some(required_flag_value(&mut args, &arg, "a file path")?);
             }
             _ if arg.starts_with("--") => {
                 return Err(vec![format!("error: unknown flag \"{arg}\"")]);
@@ -225,7 +231,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
     }
 
     if cli.options.declaration_maps && !cli.options.emit_dts {
-        return Err(vec!["error: --declaration-maps requires --emit-dts".to_string()]);
+        return Err(vec![
+            "error: --declaration-maps requires --emit-dts".to_string(),
+        ]);
     }
 
     if cli.options.source_maps && cli.options.inline_source_maps {
@@ -246,7 +254,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cli, Vec<String>
     }
 
     if cli.options.source_root_dir.is_some() && cli.options.source_root.is_none() {
-        return Err(vec!["error: --source-root-dir requires --source-root".to_string()]);
+        return Err(vec![
+            "error: --source-root-dir requires --source-root".to_string(),
+        ]);
     }
 
     Ok(cli)
@@ -278,11 +288,17 @@ fn load_entries(
     let mut lines = lines.into_iter();
     let mut entries = Vec::new();
     while let Some(src) = lines.next() {
-        let mut output =
-            |emit: bool| emit.then(|| lines.next().unwrap()).filter(|out| !out.is_empty());
+        let mut output = |emit: bool| {
+            emit.then(|| lines.next().unwrap())
+                .filter(|out| !out.is_empty())
+        };
         let js_out = output(options.emit_js);
         let dts_out = output(options.emit_dts);
-        entries.push(Entry { src, js_out, dts_out });
+        entries.push(Entry {
+            src,
+            js_out,
+            dts_out,
+        });
     }
     Ok(entries)
 }
@@ -307,7 +323,9 @@ fn transpile_and_write_entries(
                     let mut errors = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(entry) = entries.get(i) else { break errors };
+                        let Some(entry) = entries.get(i) else {
+                            break errors;
+                        };
                         let entry_errors = worker.transpile_and_write_entry(entry);
                         if !entry_errors.is_empty() {
                             errors.push((i, entry_errors));
@@ -316,12 +334,19 @@ fn transpile_and_write_entries(
                 })
             })
             .collect();
-        workers.into_iter().flat_map(|worker| worker.join().unwrap()).collect()
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
     });
     errors.sort_by_key(|(i, _)| *i);
 
     let all_errors: Vec<String> = errors.into_iter().flat_map(|(_, e)| e).collect();
-    if all_errors.is_empty() { Ok(()) } else { Err(all_errors) }
+    if all_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(all_errors)
+    }
 }
 
 // Records --source-root in a codegen map. A macro rather than a function: the map type is not
@@ -442,7 +467,9 @@ impl Worker<'_> {
             let codegen_ret = Codegen::new()
                 .with_options(build_codegen_options(
                     self.options,
-                    self.options.declaration_maps.then(|| dts_map_source.to_path_buf()),
+                    self.options
+                        .declaration_maps
+                        .then(|| dts_map_source.to_path_buf()),
                 ))
                 .build(&decl_ret.program);
             outputs.dts_code = Some(codegen_ret.code);
@@ -462,12 +489,17 @@ impl Worker<'_> {
             let transformer_ret =
                 Transformer::new(allocator, Path::new(filename), self.transform_options)
                     .build_with_scoping(scoping, &mut parser_ret.program);
-            let diagnostics = semantic_diagnostics.into_iter().chain(transformer_ret.diagnostics);
+            let diagnostics = semantic_diagnostics
+                .into_iter()
+                .chain(transformer_ret.diagnostics);
             check_diagnostics(filename, source_text, diagnostics)?;
 
             if self.options.module.is_commonjs() {
                 // The transformer may leave `export {}` after erasing type-only module syntax.
-                parser_ret.program.body.retain(|stmt| !is_empty_export(stmt));
+                parser_ret
+                    .program
+                    .body
+                    .retain(|stmt| !is_empty_export(stmt));
                 let diagnostics =
                     commonjs_diagnostics(&parser_ret.program, &parser_ret.module_record);
                 check_diagnostics(filename, source_text, diagnostics)?;
@@ -511,7 +543,11 @@ fn write_output(path: &str, code: &str, map: Option<&SourceMapOutput>) -> std::i
         }
         match map {
             SourceMapOutput::File(json) => {
-                write!(file, "//# sourceMappingURL={}.map", out.file_name().unwrap().to_string_lossy())?;
+                write!(
+                    file,
+                    "//# sourceMappingURL={}.map",
+                    out.file_name().unwrap().to_string_lossy()
+                )?;
                 fs::write(format!("{path}.map"), json)?;
             }
             SourceMapOutput::Inline(url) => write!(file, "//# sourceMappingURL={url}")?,
@@ -559,7 +595,11 @@ fn build_codegen_options(options: &Options, source_map_path: Option<PathBuf>) ->
     CodegenOptions {
         source_map_path,
         comments: if options.remove_comments {
-            CommentOptions { normal: false, jsdoc: false, ..CommentOptions::default() }
+            CommentOptions {
+                normal: false,
+                jsdoc: false,
+                ..CommentOptions::default()
+            }
         } else {
             CommentOptions::default()
         },
@@ -741,7 +781,11 @@ mod tests {
         paths: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<(), Vec<String>> {
         let mut cli: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-        cli.extend(paths.into_iter().map(|p| dir.join(p).to_str().unwrap().to_string()));
+        cli.extend(
+            paths
+                .into_iter()
+                .map(|p| dir.join(p).to_str().unwrap().to_string()),
+        );
         run(cli.into_iter())
     }
 
@@ -766,11 +810,18 @@ mod tests {
     }
 
     fn default_options() -> Options {
-        Options { emit_js: true, emit_dts: true, ..Options::default() }
+        Options {
+            emit_js: true,
+            emit_dts: true,
+            ..Options::default()
+        }
     }
 
     fn js_options() -> Options {
-        Options { emit_dts: false, ..default_options() }
+        Options {
+            emit_dts: false,
+            ..default_options()
+        }
     }
 
     fn target_options(target: &str) -> Options {
@@ -781,19 +832,30 @@ mod tests {
     }
 
     fn commonjs_options() -> Options {
-        Options { module: Module::CommonJS, ..js_options() }
+        Options {
+            module: Module::CommonJS,
+            ..js_options()
+        }
     }
 
     fn esm_options() -> Options {
-        Options { module: Module::Esm, ..js_options() }
+        Options {
+            module: Module::Esm,
+            ..js_options()
+        }
     }
 
     fn transpile_js(filename: &str, source_text: &str, options: &Options) -> String {
-        transpile(filename, source_text, options).unwrap().js_code.unwrap()
+        transpile(filename, source_text, options)
+            .unwrap()
+            .js_code
+            .unwrap()
     }
 
     fn transpile_err(filename: &str, source_text: &str, options: &Options) -> String {
-        transpile(filename, source_text, options).unwrap_err().concat()
+        transpile(filename, source_text, options)
+            .unwrap_err()
+            .concat()
     }
 
     fn transpile_single_err(filename: &str, source_text: &str, options: &Options) -> String {
@@ -804,7 +866,11 @@ mod tests {
 
     #[test]
     fn target_downlevels_exponentiation() {
-        let js = transpile_js("a.ts", "export const x: number = 2 ** 10;\n", &target_options("es2015"));
+        let js = transpile_js(
+            "a.ts",
+            "export const x: number = 2 ** 10;\n",
+            &target_options("es2015"),
+        );
         assert!(js.contains("Math.pow(2, 10)"), "js: {js}");
     }
 
@@ -893,7 +959,10 @@ mod tests {
             "export async function f(): Promise<number> { return 1; }\n",
             &helpers_options(None),
         );
-        assert!(js.contains("\"@oxc-project/runtime/helpers/asyncToGenerator\""), "js: {js}");
+        assert!(
+            js.contains("\"@oxc-project/runtime/helpers/asyncToGenerator\""),
+            "js: {js}"
+        );
     }
 
     #[test]
@@ -903,7 +972,10 @@ mod tests {
             "export async function f(): Promise<number> { return 1; }\n",
             &helpers_options(Some("custom-helpers")),
         );
-        assert!(js.contains("\"custom-helpers/helpers/asyncToGenerator\""), "js: {js}");
+        assert!(
+            js.contains("\"custom-helpers/helpers/asyncToGenerator\""),
+            "js: {js}"
+        );
         assert!(!js.contains("@oxc-project/runtime"), "js: {js}");
     }
 
@@ -931,7 +1003,11 @@ mod tests {
 
     #[test]
     fn esm_rejects_export_assignment() {
-        let err = transpile_err("a.ts", "const x: number = 1;\nexport = x;\n", &esm_options());
+        let err = transpile_err(
+            "a.ts",
+            "const x: number = 1;\nexport = x;\n",
+            &esm_options(),
+        );
         assert!(err.contains("Export assignment cannot be used"), "{err}");
     }
 
@@ -1013,8 +1089,11 @@ mod tests {
 
     #[test]
     fn commonjs_rejects_esm_export() {
-        let err =
-            transpile_single_err("a.cts", "export const x: number = 1;\n", &commonjs_options());
+        let err = transpile_single_err(
+            "a.cts",
+            "export const x: number = 1;\n",
+            &commonjs_options(),
+        );
         assert!(err.contains("cannot be emitted as CommonJS"), "{err}");
     }
 
@@ -1026,7 +1105,10 @@ mod tests {
              const value: number = await load(await load(1));\nexport = value;\n",
             &commonjs_options(),
         );
-        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
+        assert!(
+            err.contains("top-level await cannot be emitted as CommonJS"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1037,7 +1119,10 @@ mod tests {
              for await (const item of items) { await item; }\nexport = 1;\n",
             &commonjs_options(),
         );
-        assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
+        assert!(
+            err.contains("top-level await cannot be emitted as CommonJS"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1056,10 +1141,15 @@ mod tests {
         for init in ["r", "await r"] {
             let err = transpile_single_err(
                 "a.ts",
-                &format!("declare const r: AsyncDisposable;\nawait using x = {init};\nexport = x;\n"),
+                &format!(
+                    "declare const r: AsyncDisposable;\nawait using x = {init};\nexport = x;\n"
+                ),
                 &commonjs_options(),
             );
-            assert!(err.contains("top-level await cannot be emitted as CommonJS"), "{err}");
+            assert!(
+                err.contains("top-level await cannot be emitted as CommonJS"),
+                "{err}"
+            );
         }
     }
 
@@ -1083,7 +1173,10 @@ mod tests {
             "const url: string = import.meta.url;\nexport = url;\n",
             &commonjs_options(),
         );
-        assert!(err.contains("import.meta cannot be emitted as CommonJS"), "{err}");
+        assert!(
+            err.contains("import.meta cannot be emitted as CommonJS"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1131,7 +1224,8 @@ mod tests {
             "a.ts",
             "export function add(a: number, b: number): number { return a + b; }\n",
             &default_options(),
-        ).unwrap();
+        )
+        .unwrap();
         let dts = result.dts_code.unwrap();
         assert!(
             dts.contains("export declare function add(a: number, b: number): number"),
@@ -1159,7 +1253,10 @@ export const x: number = 1;
 
     #[test]
     fn remove_comments_strips_all_but_legal_comments() {
-        let options = Options { remove_comments: true, ..default_options() };
+        let options = Options {
+            remove_comments: true,
+            ..default_options()
+        };
         let outputs = transpile("a.ts", COMMENTED, &options).unwrap();
         let js = outputs.js_code.unwrap();
         assert!(js.contains("/*! legal */"), "js: {js}");
@@ -1171,14 +1268,18 @@ export const x: number = 1;
 
     #[test]
     fn remove_comments_keeps_pure_annotations() {
-        let options = Options { remove_comments: true, ..js_options() };
+        let options = Options {
+            remove_comments: true,
+            ..js_options()
+        };
         let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
         assert!(js.contains("/* @__PURE__ */"), "js: {js}");
     }
 
     #[test]
     fn strip_internal_omits_internal_declarations() {
-        let src = "/** @internal */\nexport const secret: number = 1;\nexport const open: number = 2;\n";
+        let src =
+            "/** @internal */\nexport const secret: number = 1;\nexport const open: number = 2;\n";
         let kept = transpile("a.ts", src, &default_options()).unwrap();
         assert!(kept.dts_code.unwrap().contains("secret"));
 
@@ -1200,9 +1301,15 @@ export const x: number = 1;
         let js = transpile_js("a.ts", src, &js_options());
         assert!(!js.contains("./fx.js"), "js: {js}");
 
-        let options = Options { only_remove_type_imports: true, ..js_options() };
+        let options = Options {
+            only_remove_type_imports: true,
+            ..js_options()
+        };
         let js = transpile_js("a.ts", src, &options);
-        assert!(js.contains("import { sideEffect } from \"./fx.js\""), "js: {js}");
+        assert!(
+            js.contains("import { sideEffect } from \"./fx.js\""),
+            "js: {js}"
+        );
         assert!(!js.contains("./t.js"), "js: {js}");
     }
 
@@ -1217,7 +1324,8 @@ export const x: number = 1;
             "a.ts",
             "export function f() { return someValue(); }\nfunction someValue() { return 1; }\n",
             &default_options(),
-        ).unwrap_err();
+        )
+        .unwrap_err();
     }
 
     #[test]
@@ -1233,7 +1341,10 @@ export const x: number = 1;
 
     #[test]
     fn use_define_for_class_fields_keeps_field_definitions() {
-        let options = Options { use_define_for_class_fields: true, ..js_options() };
+        let options = Options {
+            use_define_for_class_fields: true,
+            ..js_options()
+        };
         let js = transpile_js(
             "a.ts",
             "export class C { declared: number; assigned = 1; }\n",
@@ -1249,16 +1360,25 @@ export const x: number = 1;
             source_maps: true,
             ..default_options()
         };
-        let map = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap().js_map.unwrap();
+        let map = transpile("a.ts", "export const x: number = 1;\n", &options)
+            .unwrap()
+            .js_map
+            .unwrap();
         assert!(map.contains("\"a.ts\""), "map: {map}");
     }
 
     #[test]
     fn inline_source_maps_produce_data_url() {
-        let options = Options { inline_source_maps: true, ..js_options() };
+        let options = Options {
+            inline_source_maps: true,
+            ..js_options()
+        };
         let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
         let url = outputs.js_map.unwrap();
-        assert!(url.starts_with("data:application/json;charset=utf-8;base64,"), "url: {url}");
+        assert!(
+            url.starts_with("data:application/json;charset=utf-8;base64,"),
+            "url: {url}"
+        );
     }
 
     #[test]
@@ -1277,7 +1397,10 @@ export const x: number = 1;
 
     #[test]
     fn source_root_absent_by_default() {
-        let options = Options { source_maps: true, ..js_options() };
+        let options = Options {
+            source_maps: true,
+            ..js_options()
+        };
         let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
         let map = outputs.js_map.unwrap();
         assert!(!map.contains("sourceRoot"), "map: {map}");
@@ -1303,34 +1426,59 @@ export const x: number = 1;
         ]))
         .unwrap();
         let map = read(&dir.join("out/sub/a.js.map"));
-        assert!(map.contains("\"sourceRoot\":\"https://cdn.example/sources/\""), "map: {map}");
+        assert!(
+            map.contains("\"sourceRoot\":\"https://cdn.example/sources/\""),
+            "map: {map}"
+        );
         assert!(map.contains("\"sources\":[\"sub/a.ts\"]"), "map: {map}");
     }
 
     #[test]
     fn run_rejects_source_root_dir_without_source_root() {
-        let err = run(args(&["--emit-js", "--source-maps", "--source-root-dir", "src"])).unwrap_err();
-        assert_eq!(err, vec!["error: --source-root-dir requires --source-root".to_string()]);
+        let err = run(args(&[
+            "--emit-js",
+            "--source-maps",
+            "--source-root-dir",
+            "src",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            vec!["error: --source-root-dir requires --source-root".to_string()]
+        );
     }
 
     #[test]
     fn run_rejects_source_maps_with_inline_source_maps() {
-        let err = run(args(&["--emit-js", "--source-maps", "--inline-source-maps"])).unwrap_err();
+        let err = run(args(&[
+            "--emit-js",
+            "--source-maps",
+            "--inline-source-maps",
+        ]))
+        .unwrap_err();
         assert_eq!(
             err,
-            vec!["error: --source-maps and --inline-source-maps are mutually exclusive".to_string()]
+            vec![
+                "error: --source-maps and --inline-source-maps are mutually exclusive".to_string()
+            ]
         );
     }
 
     #[test]
     fn run_rejects_source_root_without_maps() {
         let err = run(args(&["--emit-js", "--source-root", "/src"])).unwrap_err();
-        assert!(err[0].starts_with("error: --source-root requires"), "{err:?}");
+        assert!(
+            err[0].starts_with("error: --source-root requires"),
+            "{err:?}"
+        );
     }
 
     #[test]
     fn declaration_maps_emitted_when_enabled() {
-        let options = Options { declaration_maps: true, ..default_options() };
+        let options = Options {
+            declaration_maps: true,
+            ..default_options()
+        };
         let outputs = transpile("a.ts", "export const x: number = 1;\n", &options).unwrap();
         assert!(outputs.js_map.is_none());
         let map = outputs.dts_map.unwrap();
@@ -1340,14 +1488,18 @@ export const x: number = 1;
 
     #[test]
     fn declaration_maps_not_emitted_by_default() {
-        let outputs = transpile("a.ts", "export const x: number = 1;\n", &default_options()).unwrap();
+        let outputs =
+            transpile("a.ts", "export const x: number = 1;\n", &default_options()).unwrap();
         assert!(outputs.dts_map.is_none());
     }
 
     #[test]
     fn run_rejects_declaration_maps_without_emit_dts() {
         let err = run(args(&["--emit-js", "--declaration-maps"])).unwrap_err();
-        assert_eq!(err, vec!["error: --declaration-maps requires --emit-dts".to_string()]);
+        assert_eq!(
+            err,
+            vec!["error: --declaration-maps requires --emit-dts".to_string()]
+        );
     }
 
     #[test]
@@ -1360,7 +1512,11 @@ export const x: number = 1;
 
     #[test]
     fn transpile_transforms_jsx() {
-        let js = transpile_js("a.tsx", "export const el: object = <div id={1} />;\n", &js_options());
+        let js = transpile_js(
+            "a.tsx",
+            "export const el: object = <div id={1} />;\n",
+            &js_options(),
+        );
         assert!(js.contains("react/jsx-runtime"), "js: {js}");
         assert!(js.contains("_jsx("), "js: {js}");
         assert!(!js.contains(": object"), "js: {js}");
@@ -1368,7 +1524,11 @@ export const x: number = 1;
 
     #[test]
     fn transpile_transforms_jsx_in_plain_jsx_file() {
-        let js = transpile_js("a.jsx", "export const el = <div id={1} />;\n", &js_options());
+        let js = transpile_js(
+            "a.jsx",
+            "export const el = <div id={1} />;\n",
+            &js_options(),
+        );
         assert!(js.contains("_jsx("), "js: {js}");
     }
 
@@ -1376,8 +1536,15 @@ export const x: number = 1;
     // providing React is the caller's concern, as with tsc's jsx=react.
     #[test]
     fn jsx_classic_uses_create_element() {
-        let options = Options { jsx: JsxRuntime::Classic, ..js_options() };
-        let js = transpile_js("a.tsx", "export const el: object = <div id={1} />;\n", &options);
+        let options = Options {
+            jsx: JsxRuntime::Classic,
+            ..js_options()
+        };
+        let js = transpile_js(
+            "a.tsx",
+            "export const el: object = <div id={1} />;\n",
+            &options,
+        );
         assert!(js.contains("React.createElement"), "js: {js}");
         assert!(!js.contains("react/jsx-runtime"), "js: {js}");
         assert!(!js.contains("<div"), "js: {js}");
@@ -1385,7 +1552,10 @@ export const x: number = 1;
 
     #[test]
     fn jsx_import_source_changes_runtime_module() {
-        let options = Options { jsx_import_source: Some("preact".to_string()), ..js_options() };
+        let options = Options {
+            jsx_import_source: Some("preact".to_string()),
+            ..js_options()
+        };
         let js = transpile_js("a.tsx", "export const el = <div />;\n", &options);
         assert!(js.contains("\"preact/jsx-runtime\""), "js: {js}");
         assert!(!js.contains("\"react/jsx-runtime\""), "js: {js}");
@@ -1408,7 +1578,10 @@ export const x: number = 1;
         );
         assert!(js.contains("h(\"div\""), "js: {js}");
         assert!(js.contains("h(Fragment"), "js: {js}");
-        assert!(js.contains("import { h, Fragment } from \"preact\""), "js: {js}");
+        assert!(
+            js.contains("import { h, Fragment } from \"preact\""),
+            "js: {js}"
+        );
         assert!(!js.contains("React.createElement"), "js: {js}");
     }
 
@@ -1422,7 +1595,10 @@ export const x: number = 1;
             "preact",
         ]))
         .unwrap_err();
-        assert_eq!(err, vec!["error: --jsx-import-source requires --jsx automatic".to_string()]);
+        assert_eq!(
+            err,
+            vec!["error: --jsx-import-source requires --jsx automatic".to_string()]
+        );
     }
 
     #[test]
@@ -1437,7 +1613,10 @@ export const x: number = 1;
     #[test]
     fn run_rejects_unsupported_jsx() {
         let err = run(args(&["--emit-js", "--jsx", "react-jsx"])).unwrap_err();
-        assert!(err[0].contains("unsupported --jsx \"react-jsx\""), "{err:?}");
+        assert!(
+            err[0].contains("unsupported --jsx \"react-jsx\""),
+            "{err:?}"
+        );
         let err = run(args(&["--emit-js", "--jsx", "preserve"])).unwrap_err();
         assert!(err[0].contains("unsupported --jsx \"preserve\""), "{err:?}");
     }
@@ -1464,7 +1643,10 @@ export const x: number = 1;
     #[test]
     fn transpile_rewrites_dynamic_import_extension() {
         let dir = test_dir("transpile_dynamic_import_rewrite");
-        let options = Options { rewrite_extensions: true, ..js_options() };
+        let options = Options {
+            rewrite_extensions: true,
+            ..js_options()
+        };
         let src = dir.join("a.ts");
         let js = transpile_js(
             src.to_str().unwrap(),
@@ -1482,9 +1664,16 @@ export const x: number = 1;
         let dir = test_dir("transpile_dynamic_import_extensionless");
         write_file(&dir, "b.ts", "");
         for rewrite_extensions in [false, true] {
-            let options = Options { rewrite_extensions, ..js_options() };
+            let options = Options {
+                rewrite_extensions,
+                ..js_options()
+            };
             let src = dir.join("a.ts");
-            let js = transpile_js(src.to_str().unwrap(), "export const p = import(\"./b\");\n", &options);
+            let js = transpile_js(
+                src.to_str().unwrap(),
+                "export const p = import(\"./b\");\n",
+                &options,
+            );
             assert!(js.contains("import(\"./b\")"), "js: {js}");
         }
     }
@@ -1492,7 +1681,10 @@ export const x: number = 1;
     #[test]
     fn transpile_leaves_non_literal_dynamic_import() {
         let dir = test_dir("transpile_dynamic_import_non_literal");
-        let options = Options { rewrite_extensions: true, ..js_options() };
+        let options = Options {
+            rewrite_extensions: true,
+            ..js_options()
+        };
         let src = dir.join("a.ts");
         let js = transpile_js(
             src.to_str().unwrap(),
@@ -1504,7 +1696,10 @@ export const x: number = 1;
 
     #[test]
     fn transpile_rewrites_static_import_extensions() {
-        let options = Options { rewrite_extensions: true, ..js_options() };
+        let options = Options {
+            rewrite_extensions: true,
+            ..js_options()
+        };
         let js = transpile_js(
             "a.ts",
             "export { b } from \"./b.ts\";\nexport { c } from \"../c.cts\";\nexport { d } from \"./d.js\";\n",
@@ -1523,7 +1718,10 @@ export const x: number = 1;
 
     #[test]
     fn transpile_rewrites_bare_specifier_with_slash() {
-        let options = Options { rewrite_extensions: true, ..js_options() };
+        let options = Options {
+            rewrite_extensions: true,
+            ..js_options()
+        };
         let js = transpile_js("a.ts", "export { x } from \"pkg/x.ts\";\n", &options);
         assert!(js.contains("\"pkg/x.js\""));
     }
@@ -1542,7 +1740,10 @@ export class C {
 ";
 
     fn decorator_options() -> Options {
-        Options { experimental_decorators: true, ..js_options() }
+        Options {
+            experimental_decorators: true,
+            ..js_options()
+        }
     }
 
     #[test]
@@ -1557,7 +1758,10 @@ export class C {
         let js = transpile_js("a.ts", DECORATED, &decorator_options());
         assert!(!js.contains("@dec"), "js: {js}");
         assert!(js.contains("_decorate([dec]"), "js: {js}");
-        assert!(js.contains("@oxc-project/runtime/helpers/decorate"), "js: {js}");
+        assert!(
+            js.contains("@oxc-project/runtime/helpers/decorate"),
+            "js: {js}"
+        );
         assert!(!js.contains("design:"), "js: {js}");
     }
 
@@ -1574,11 +1778,23 @@ export class C {
 
     #[test]
     fn emit_decorator_metadata_records_design_types() {
-        let options = Options { emit_decorator_metadata: true, ..decorator_options() };
+        let options = Options {
+            emit_decorator_metadata: true,
+            ..decorator_options()
+        };
         let js = transpile_js("a.ts", DECORATED, &options);
-        assert!(js.contains("_decorateMetadata(\"design:type\", Function)"), "js: {js}");
-        assert!(js.contains("_decorateMetadata(\"design:paramtypes\", [Object])"), "js: {js}");
-        assert!(js.contains("_decorateMetadata(\"design:returntype\", void 0)"), "js: {js}");
+        assert!(
+            js.contains("_decorateMetadata(\"design:type\", Function)"),
+            "js: {js}"
+        );
+        assert!(
+            js.contains("_decorateMetadata(\"design:paramtypes\", [Object])"),
+            "js: {js}"
+        );
+        assert!(
+            js.contains("_decorateMetadata(\"design:returntype\", void 0)"),
+            "js: {js}"
+        );
     }
 
     // With strictNullChecks off, `string | null` is just string to tsc, so the metadata records
@@ -1591,7 +1807,10 @@ export class C {
             ..decorator_options()
         };
         let js = transpile_js("a.ts", DECORATED, &options);
-        assert!(js.contains("_decorateMetadata(\"design:paramtypes\", [String])"), "js: {js}");
+        assert!(
+            js.contains("_decorateMetadata(\"design:paramtypes\", [String])"),
+            "js: {js}"
+        );
     }
 
     #[test]
@@ -1637,7 +1856,9 @@ export class C {
             let err = run(args(&["--emit-js", "--cpus", value])).unwrap_err();
             assert_eq!(
                 err,
-                vec![format!("error: --cpus must be a positive integer, got \"{value}\"")]
+                vec![format!(
+                    "error: --cpus must be a positive integer, got \"{value}\""
+                )]
             );
         }
     }
@@ -1666,9 +1887,19 @@ export class C {
         write_file(
             &dir,
             "manifest.txt",
-            &format!("{}\n{}\n{}\n", src.display(), js_out.display(), dts_out.display()),
+            &format!(
+                "{}\n{}\n{}\n",
+                src.display(),
+                js_out.display(),
+                dts_out.display()
+            ),
         );
-        run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"]).unwrap();
+        run_in(
+            &dir,
+            &["--emit-js", "--emit-dts", "--manifest"],
+            ["manifest.txt"],
+        )
+        .unwrap();
         assert!(read(&js_out).contains("export const x = 1"));
         assert!(read(&dts_out).contains("declare const x: number"));
     }
@@ -1724,7 +1955,12 @@ export class C {
             "manifest.txt",
             &format!("{}\n{}\n\n", src.display(), js_out.display()),
         );
-        run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"]).unwrap();
+        run_in(
+            &dir,
+            &["--emit-js", "--emit-dts", "--manifest"],
+            ["manifest.txt"],
+        )
+        .unwrap();
         assert!(read(&js_out).contains("export const x = 1"));
         assert!(!dir.join("out/a.d.ts").exists());
     }
@@ -1742,8 +1978,12 @@ export class C {
                 "manifest.txt",
                 &format!("{}\n\n{}\n", src.display(), dts_out.display()),
             );
-            let err = run_in(&dir, &["--emit-js", "--emit-dts", "--manifest"], ["manifest.txt"])
-                .unwrap_err();
+            let err = run_in(
+                &dir,
+                &["--emit-js", "--emit-dts", "--manifest"],
+                ["manifest.txt"],
+            )
+            .unwrap_err();
             assert!(err[0].contains("produces no outputs"), "{err:?}");
             assert!(!dts_out.exists());
         }
@@ -1755,7 +1995,10 @@ export class C {
         write_file(&dir, "a.ts", "export const x: number = 1;\n");
         run_in(&dir, &["--emit-js", "--source-maps"], ["a.ts", "out/a.js"]).unwrap();
         let js = read(&dir.join("out/a.js"));
-        assert!(js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"), "js: {js}");
+        assert!(
+            js.ends_with("= 1;\n//# sourceMappingURL=a.js.map"),
+            "js: {js}"
+        );
         let map = read(&dir.join("out/a.js.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
     }
@@ -1795,7 +2038,10 @@ export class C {
         assert!(!dir.join("out/a.js.map").exists());
         assert!(!read(&dir.join("out/a.js")).contains("sourceMappingURL"));
         let dts = read(&dir.join("types/a.d.ts"));
-        assert!(dts.ends_with("//# sourceMappingURL=a.d.ts.map"), "dts: {dts}");
+        assert!(
+            dts.ends_with("//# sourceMappingURL=a.d.ts.map"),
+            "dts: {dts}"
+        );
         let map = read(&dir.join("types/a.d.ts.map"));
         assert!(map.contains("\"sources\":[\"../a.ts\"]"), "map: {map}");
     }
@@ -1807,7 +2053,10 @@ export class C {
             PathBuf::from("main.ts")
         );
         assert_eq!(
-            path_relative_to(Path::new("pkg/src/a.ts"), Path::new("bazel-out/bin/pkg/dist")),
+            path_relative_to(
+                Path::new("pkg/src/a.ts"),
+                Path::new("bazel-out/bin/pkg/dist")
+            ),
             PathBuf::from("../../../../pkg/src/a.ts")
         );
         assert_eq!(
@@ -1829,7 +2078,14 @@ export class C {
         let err = run_in(
             &dir,
             &["--emit-js"],
-            ["bad1.ts", "out/bad1.js", "bad2.ts", "out/bad2.js", "good.ts", "out/good.js"],
+            [
+                "bad1.ts",
+                "out/bad1.js",
+                "bad2.ts",
+                "out/bad2.js",
+                "good.ts",
+                "out/good.js",
+            ],
         )
         .unwrap_err();
         assert!(err.len() >= 2, "errors: {err:?}");
@@ -1844,7 +2100,14 @@ export class C {
         let err = run_in(
             &dir,
             &["--emit-js", "--emit-dts", "--source-maps"],
-            ["good.ts", "out/good.js", "out/good.d.ts", "bad.ts", "out/bad.js", "out/bad.d.ts"],
+            [
+                "good.ts",
+                "out/good.js",
+                "out/good.d.ts",
+                "bad.ts",
+                "out/bad.js",
+                "out/bad.d.ts",
+            ],
         )
         .unwrap_err();
 
